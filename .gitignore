@@ -11,12 +11,16 @@
 # Go build output
 /cmd/gqm/gqm
 
+# Go vendor
+/vendor/
+
 # Coverage
 *.out
 coverage.html
 
 # Temp / debug
 /tmp/
+tmp/*
 
 # IDE
 .vscode/
