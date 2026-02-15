@@ -24,7 +24,7 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 ## Installation
 
 ```bash
-go get github.com/<username>/gqm
+go get github.com/benedict-erwin/gqm
 ```
 
 ## Quick Start
