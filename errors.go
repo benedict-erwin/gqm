@@ -23,4 +23,13 @@ var (
 
 	// ErrMaxRetryExceeded is returned when a job has exceeded its maximum retry count.
 	ErrMaxRetryExceeded = errors.New("gqm: max retry exceeded")
+
+	// ErrDuplicatePool is returned when a pool with the same name is registered twice.
+	ErrDuplicatePool = errors.New("gqm: duplicate pool name")
+
+	// ErrJobTypeConflict is returned when a job type is assigned to multiple pools.
+	ErrJobTypeConflict = errors.New("gqm: job type already assigned to another pool")
+
+	// ErrDuplicateCronEntry is returned when a cron entry with the same ID is registered twice.
+	ErrDuplicateCronEntry = errors.New("gqm: duplicate cron entry ID")
 )

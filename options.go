@@ -25,7 +25,9 @@ func RetryIntervals(intervals ...int) EnqueueOption {
 	return func(j *Job) { j.RetryIntervals = intervals }
 }
 
-// JobID sets a custom job ID (for idempotency).
+// JobID overrides the default UUID v7 job ID with a custom value.
+// The caller is responsible for ensuring uniqueness — if a job with the
+// same ID already exists in Redis, its data will be silently overwritten.
 func JobID(id string) EnqueueOption {
 	return func(j *Job) { j.ID = id }
 }

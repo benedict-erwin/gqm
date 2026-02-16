@@ -2,6 +2,7 @@ package gqm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -78,6 +79,17 @@ type Server struct {
 	pools    []*pool
 	logger   *slog.Logger
 
+	// jobTypePool tracks which pool each job type is assigned to.
+	// Key: job type, Value: pool name.
+	// Populated by Pool() (explicit) and Handle() with Workers() (implicit).
+	jobTypePool map[string]string
+
+	// poolNames tracks registered pool names to detect duplicates.
+	poolNames map[string]bool
+
+	// cronEntries holds registered cron entries indexed by ID.
+	cronEntries map[string]*CronEntry
+
 	mu      sync.RWMutex
 	running bool
 	stopCh  chan struct{}
@@ -110,12 +122,15 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 	}
 
 	return &Server{
-		cfg:      cfg,
-		rc:       rc,
-		scripts:  sr,
-		handlers: make(map[string]Handler),
-		logger:   cfg.logger,
-		stopCh:   make(chan struct{}),
+		cfg:         cfg,
+		rc:          rc,
+		scripts:     sr,
+		handlers:    make(map[string]Handler),
+		jobTypePool: make(map[string]string),
+		poolNames:   make(map[string]bool),
+		cronEntries: make(map[string]*CronEntry),
+		logger:      cfg.logger,
+		stopCh:      make(chan struct{}),
 	}, nil
 }
 
@@ -140,13 +155,91 @@ func (s *Server) Handle(jobType string, handler Handler, opts ...HandleOption) e
 	s.handlers[jobType] = handler
 
 	if hcfg.workers > 0 {
+		// Check for conflict: job type already assigned to another pool
+		if existingPool, ok := s.jobTypePool[jobType]; ok {
+			return fmt.Errorf("%w: job type %q already assigned to pool %q, cannot create implicit pool",
+				ErrJobTypeConflict, jobType, existingPool)
+		}
+
 		// Implicit pool: dedicated pool + queue per job type
 		pcfg := newDefaultPoolConfig(jobType, jobType)
 		pcfg.concurrency = hcfg.workers
 		pcfg.gracePeriod = s.cfg.gracePeriod
 		s.pools = append(s.pools, newPool(pcfg, s))
+		s.jobTypePool[jobType] = jobType
+		s.poolNames[jobType] = true
 	}
 
+	return nil
+}
+
+// Pool registers an explicit worker pool configuration (Layer 3).
+// This allows grouping multiple job types into a single pool with shared
+// concurrency, custom queues, dequeue strategy, and retry policy.
+//
+// Must be called before Start(). Returns an error if the pool name is
+// already registered or if the configuration is invalid.
+func (s *Server) Pool(cfg PoolConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.running {
+		return fmt.Errorf("cannot register pool while server is running")
+	}
+
+	if cfg.Name == "" {
+		return fmt.Errorf("pool name must not be empty")
+	}
+
+	if s.poolNames[cfg.Name] {
+		return fmt.Errorf("%w: %s", ErrDuplicatePool, cfg.Name)
+	}
+
+	// Check for conflict: job type already assigned to another pool
+	for _, jt := range cfg.JobTypes {
+		if existingPool, ok := s.jobTypePool[jt]; ok {
+			return fmt.Errorf("%w: job type %q already assigned to pool %q, cannot assign to %q",
+				ErrJobTypeConflict, jt, existingPool, cfg.Name)
+		}
+	}
+
+	pcfg := cfg.toInternal(s.cfg.gracePeriod)
+	s.pools = append(s.pools, newPool(pcfg, s))
+	s.poolNames[cfg.Name] = true
+
+	// Track job type → pool assignments
+	for _, jt := range cfg.JobTypes {
+		s.jobTypePool[jt] = cfg.Name
+	}
+
+	return nil
+}
+
+// Schedule registers a cron entry for recurring job scheduling.
+// Must be called before Start(). The entry's cron expression is parsed and
+// validated. Duplicate IDs are rejected with ErrDuplicateCronEntry.
+func (s *Server) Schedule(entry CronEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.running {
+		return fmt.Errorf("cannot register cron entry while server is running")
+	}
+
+	entry.applyDefaults()
+	if err := entry.validate(); err != nil {
+		return err
+	}
+
+	if _, exists := s.cronEntries[entry.ID]; exists {
+		return fmt.Errorf("%w: %s", ErrDuplicateCronEntry, entry.ID)
+	}
+
+	now := time.Now()
+	entry.CreatedAt = now.UnixNano()
+	entry.UpdatedAt = now.UnixNano()
+
+	s.cronEntries[entry.ID] = &entry
 	return nil
 }
 
@@ -168,9 +261,15 @@ func (s *Server) Start(ctx context.Context) error {
 	// Ensure a default pool exists for handlers without Workers()
 	s.ensureDefaultPool()
 
+	// Save cron entries to Redis
+	if err := s.saveCronEntries(ctx); err != nil {
+		return fmt.Errorf("saving cron entries: %w", err)
+	}
+
 	s.logger.Info("server starting",
 		"pools", len(s.pools),
 		"handlers", len(s.handlers),
+		"cron_entries", len(s.cronEntries),
 	)
 
 	// Create a cancellable context for all pools
@@ -184,8 +283,8 @@ func (s *Server) Start(ctx context.Context) error {
 	// Start all pools and the retry scheduler
 	var wg sync.WaitGroup
 
-	// Retry scheduler
-	sched := newRetryScheduler(s)
+	// Scheduler engine (handles retry/delayed jobs + cron evaluation)
+	sched := newSchedulerEngine(s)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -242,15 +341,9 @@ func (s *Server) Stop() {
 
 // ensureDefaultPool creates a "default" pool for handlers not assigned to any pool.
 func (s *Server) ensureDefaultPool() {
-	// Collect handlers that don't have an implicit pool
-	assignedTypes := make(map[string]bool)
-	for _, p := range s.pools {
-		assignedTypes[p.cfg.name] = true
-	}
-
 	var unassigned []string
 	for jt := range s.handlers {
-		if !assignedTypes[jt] {
+		if _, assigned := s.jobTypePool[jt]; !assigned {
 			unassigned = append(unassigned, jt)
 		}
 	}
@@ -267,6 +360,31 @@ func (s *Server) ensureDefaultPool() {
 		"concurrency", pcfg.concurrency,
 		"unassigned_handlers", unassigned,
 	)
+}
+
+// saveCronEntries persists registered cron entries to Redis.
+func (s *Server) saveCronEntries(ctx context.Context) error {
+	if len(s.cronEntries) == 0 {
+		return nil
+	}
+
+	entriesKey := s.rc.Key("cron", "entries")
+	pipe := s.rc.rdb.Pipeline()
+
+	for id, entry := range s.cronEntries {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("marshaling cron entry %q: %w", id, err)
+		}
+		pipe.HSet(ctx, entriesKey, id, string(data))
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("writing cron entries to redis: %w", err)
+	}
+
+	s.logger.Info("cron entries saved to redis", "count", len(s.cronEntries))
+	return nil
 }
 
 // resolveTimeout returns the effective timeout for a job.

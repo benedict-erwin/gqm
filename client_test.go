@@ -137,6 +137,105 @@ func TestClient_GetJob(t *testing.T) {
 	rc.rdb.Del(ctx, rc.Key("job", original.ID), rc.Key("queue", "default", "ready"), rc.Key("queues"))
 }
 
+func TestClient_EnqueueAt(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+
+	client := &Client{rc: rc}
+
+	at := time.Now().Add(1 * time.Hour)
+	job, err := client.EnqueueAt(ctx, at, "email.send", Payload{"to": "user@example.com"},
+		Queue("email"),
+	)
+	if err != nil {
+		t.Fatalf("EnqueueAt: %v", err)
+	}
+
+	if job.Status != StatusScheduled {
+		t.Errorf("Status = %q, want %q", job.Status, StatusScheduled)
+	}
+	if job.ScheduledAt == 0 {
+		t.Error("ScheduledAt should be set")
+	}
+
+	// Verify job hash exists.
+	jobKey := rc.Key("job", job.ID)
+	status, err := rc.rdb.HGet(ctx, jobKey, "status").Result()
+	if err != nil {
+		t.Fatalf("HGet status: %v", err)
+	}
+	if status != StatusScheduled {
+		t.Errorf("redis status = %q, want %q", status, StatusScheduled)
+	}
+
+	// Verify job is in scheduled sorted set (not in ready queue).
+	scheduledKey := rc.Key("scheduled")
+	score, err := rc.rdb.ZScore(ctx, scheduledKey, job.ID).Result()
+	if err != nil {
+		t.Fatalf("ZScore: %v", err)
+	}
+	if int64(score) != at.Unix() {
+		t.Errorf("scheduled score = %v, want %v", int64(score), at.Unix())
+	}
+
+	// Verify NOT in ready queue.
+	queueKey := rc.Key("queue", "email", "ready")
+	len, err := rc.rdb.LLen(ctx, queueKey).Result()
+	if err != nil {
+		t.Fatalf("LLen: %v", err)
+	}
+	if len != 0 {
+		t.Errorf("ready queue len = %d, want 0 (delayed job should not be in ready queue)", len)
+	}
+
+	// Cleanup
+	rc.rdb.Del(ctx, jobKey, scheduledKey, rc.Key("queues"))
+}
+
+func TestClient_EnqueueAt_InvalidJobType(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+
+	client := &Client{rc: rc}
+
+	_, err := client.EnqueueAt(ctx, time.Now().Add(time.Hour), "", Payload{})
+	if err != ErrInvalidJobType {
+		t.Errorf("expected ErrInvalidJobType, got %v", err)
+	}
+}
+
+func TestClient_EnqueueIn(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+
+	client := &Client{rc: rc}
+
+	before := time.Now()
+	job, err := client.EnqueueIn(ctx, 30*time.Minute, "report.generate", Payload{})
+	if err != nil {
+		t.Fatalf("EnqueueIn: %v", err)
+	}
+
+	if job.Status != StatusScheduled {
+		t.Errorf("Status = %q, want %q", job.Status, StatusScheduled)
+	}
+
+	// Verify scheduled time is approximately 30 minutes from now.
+	scheduledKey := rc.Key("scheduled")
+	score, err := rc.rdb.ZScore(ctx, scheduledKey, job.ID).Result()
+	if err != nil {
+		t.Fatalf("ZScore: %v", err)
+	}
+
+	expectedUnix := before.Add(30 * time.Minute).Unix()
+	if int64(score) < expectedUnix-1 || int64(score) > expectedUnix+1 {
+		t.Errorf("scheduled score = %v, expected ~%v", int64(score), expectedUnix)
+	}
+
+	// Cleanup
+	rc.rdb.Del(ctx, rc.Key("job", job.ID), scheduledKey, rc.Key("queues"))
+}
+
 func TestClient_GetJob_NotFound(t *testing.T) {
 	rc := testRedisClient(t)
 	ctx := context.Background()

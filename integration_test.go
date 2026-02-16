@@ -400,6 +400,177 @@ done:
 	}
 }
 
+func TestIntegration_DelayedJob(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var processed atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("delayed.job", func(ctx context.Context, job *Job) error {
+		processed.Add(1)
+		return nil
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Schedule job 2 seconds from now.
+	job, err := client.EnqueueIn(ctx, 2*time.Second, "delayed.job", Payload{"msg": "delayed"},
+		Queue("delayed.job"),
+	)
+	if err != nil {
+		t.Fatalf("EnqueueIn: %v", err)
+	}
+
+	// Verify it's scheduled, not ready.
+	fetched, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.Status != StatusScheduled {
+		t.Fatalf("initial status = %q, want %q", fetched.Status, StatusScheduled)
+	}
+
+	// Start server — scheduler will poll and move job to ready when due.
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Job should NOT be processed immediately.
+	time.Sleep(500 * time.Millisecond)
+	if processed.Load() > 0 {
+		t.Fatal("delayed job was processed too early")
+	}
+
+	// Wait for the delay + scheduler poll interval + processing buffer.
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for delayed job processing")
+		default:
+			if processed.Load() > 0 {
+				goto done
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+done:
+	time.Sleep(200 * time.Millisecond)
+
+	fetchedAfter, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob after: %v", err)
+	}
+	if fetchedAfter.Status != StatusCompleted {
+		t.Errorf("final status = %q, want %q", fetchedAfter.Status, StatusCompleted)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+func TestIntegration_CronScheduling(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var processed atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("cron.job", func(ctx context.Context, job *Job) error {
+		processed.Add(1)
+		return nil
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// Schedule cron entry that fires every second.
+	// Use OverlapAllow so rapid fires aren't skipped while previous job is active.
+	err = server.Schedule(CronEntry{
+		ID:            "every-second",
+		Name:          "Every Second Test",
+		CronExpr:      "* * * * * *", // every second (6-field)
+		JobType:       "cron.job",
+		Queue:         "cron.job",
+		OverlapPolicy: OverlapAllow,
+		Enabled:       true,
+	})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+
+	ctx := context.Background()
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for at least 2 cron jobs to be processed (proves recurring scheduling).
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatalf("timeout: processed=%d, expected >=2", processed.Load())
+		default:
+			if processed.Load() >= 2 {
+				goto done
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+done:
+	count := processed.Load()
+	t.Logf("cron jobs processed: %d", count)
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
 func TestIntegration_GracefulShutdown(t *testing.T) {
 	skipWithoutRedis(t)
 	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())

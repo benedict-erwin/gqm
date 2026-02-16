@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +28,10 @@ type pool struct {
 	// Protected by mu. Worker goroutine Lock() on update, heartbeat RLock() on read.
 	mu         sync.RWMutex
 	activeJobs map[int]string // workerIdx -> jobID
+
+	// rrCounter is the round-robin rotation counter, incremented atomically
+	// by each dequeue call to rotate the starting queue index.
+	rrCounter atomic.Uint64
 }
 
 func newPool(cfg *poolConfig, server *Server) *pool {
@@ -42,7 +49,7 @@ func newPool(cfg *poolConfig, server *Server) *pool {
 func (p *pool) run(ctx context.Context) {
 	p.logger.Info("pool starting",
 		"concurrency", p.cfg.concurrency,
-		"queue", p.cfg.queue,
+		"queues", p.cfg.queues,
 	)
 
 	var wg sync.WaitGroup
@@ -98,16 +105,113 @@ func (p *pool) workerLoop(ctx context.Context, workerIdx int) {
 	}
 }
 
-// dequeue attempts to atomically dequeue a job using the Lua script.
+// dequeue attempts to dequeue a job from any of the pool's queues using the
+// configured dequeue strategy. If the selected queue is empty, remaining queues
+// are tried as fallback. If all queues are empty, sleeps for dequeueTimeout.
 func (p *pool) dequeue(ctx context.Context) (string, error) {
+	queues := p.cfg.queues
+
+	// Build queue visit order based on strategy
+	order := p.dequeueOrder()
+
+	for _, idx := range order {
+		jobID, err := p.dequeueFromQueue(ctx, queues[idx])
+		if err != nil {
+			return "", err
+		}
+		if jobID != "" {
+			return jobID, nil
+		}
+	}
+
+	// No job in any queue — wait before retrying
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(dequeueTimeout):
+		return "", nil
+	}
+}
+
+// dequeueOrder returns the queue index visit order based on the pool's strategy.
+func (p *pool) dequeueOrder() []int {
+	n := len(p.cfg.queues)
+	if n <= 1 {
+		return []int{0}
+	}
+
+	switch p.cfg.dequeueStrategy {
+	case StrategyRoundRobin:
+		return p.roundRobinOrder(n)
+	case StrategyWeighted:
+		return p.weightedOrder(n)
+	default: // StrategyStrict
+		return p.strictOrder(n)
+	}
+}
+
+// strictOrder returns queues in their original priority order: [0, 1, 2, ...].
+// Higher-priority queues are always checked first; lower queues may starve.
+func (p *pool) strictOrder(n int) []int {
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	return order
+}
+
+// roundRobinOrder rotates the starting queue each call, wrapping around.
+// All queues get equal opportunity regardless of position.
+func (p *pool) roundRobinOrder(n int) []int {
+	start := int(p.rrCounter.Add(1)-1) % n
+	order := make([]int, n)
+	for i := range order {
+		order[i] = (start + i) % n
+	}
+	return order
+}
+
+// weightedOrder selects a starting queue probabilistically based on position
+// weight (first queue = highest weight), then falls back to remaining queues
+// in strict priority order. This provides priority without starvation.
+//
+// Weights: queue[0]=N, queue[1]=N-1, ..., queue[N-1]=1.
+func (p *pool) weightedOrder(n int) []int {
+	// Total weight = n*(n+1)/2
+	totalWeight := n * (n + 1) / 2
+	r := rand.IntN(totalWeight)
+
+	// Find which queue the random value maps to
+	startIdx := 0
+	cumulative := 0
+	for i := 0; i < n; i++ {
+		cumulative += n - i // weight of queue[i]
+		if r < cumulative {
+			startIdx = i
+			break
+		}
+	}
+
+	// Build order: selected queue first, then remaining in strict order
+	order := make([]int, 0, n)
+	order = append(order, startIdx)
+	for i := 0; i < n; i++ {
+		if i != startIdx {
+			order = append(order, i)
+		}
+	}
+	return order
+}
+
+// dequeueFromQueue attempts to atomically dequeue a single job from the given queue.
+// Returns ("", nil) if the queue is empty.
+func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, error) {
 	rc := p.server.rc
 
-	readyKey := rc.Key("queue", p.cfg.queue, "ready")
-	processingKey := rc.Key("queue", p.cfg.queue, "processing")
+	readyKey := rc.Key("queue", queue, "ready")
+	processingKey := rc.Key("queue", queue, "processing")
 	jobPrefix := rc.Key("job") + ":"
 
-	// Use BRPOP with timeout, then process via Lua for atomicity
-	// First try: use the dequeue Lua script with RPOP (non-blocking)
 	now := time.Now().Unix()
 	timeout := int64(p.server.cfg.globalTimeout.Seconds())
 
@@ -117,15 +221,8 @@ func (p *pool) dequeue(ctx context.Context) (string, error) {
 	)
 
 	if result.Err() != nil {
-		// No job available
 		if result.Err().Error() == "redis: nil" {
-			// Wait a bit before retrying (simulates BLMOVE timeout)
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			case <-time.After(dequeueTimeout):
-				return "", nil
-			}
+			return "", nil // Queue empty
 		}
 		return "", result.Err()
 	}
@@ -301,14 +398,28 @@ func (p *pool) failJob(ctx context.Context, job *Job, errMsg string) {
 }
 
 // handleFailure evaluates retry policy and either retries or moves to DLQ.
-func (p *pool) handleFailure(ctx context.Context, job *Job, errMsg string, elapsed time.Duration) {
+// Max retry is resolved: job-level > pool-level > 0 (no retry).
+func (p *pool) handleFailure(ctx context.Context, job *Job, errMsg string, _ time.Duration) {
 	newRetryCount := job.RetryCount + 1
+	maxRetry := p.resolveMaxRetry(job)
 
-	if newRetryCount <= job.MaxRetry {
+	if maxRetry > 0 && newRetryCount <= maxRetry {
 		p.retryJob(ctx, job, errMsg, newRetryCount)
 	} else {
 		p.deadLetterJob(ctx, job, errMsg)
 	}
+}
+
+// resolveMaxRetry returns the effective max retry for a job.
+// Hierarchy: job-level (if > 0) → pool-level → 0 (no retry).
+func (p *pool) resolveMaxRetry(job *Job) int {
+	if job.MaxRetry > 0 {
+		return job.MaxRetry
+	}
+	if p.cfg.retryPolicy != nil && p.cfg.retryPolicy.MaxRetry > 0 {
+		return p.cfg.retryPolicy.MaxRetry
+	}
+	return 0
 }
 
 // retryJob schedules a job for retry.
@@ -370,8 +481,9 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 }
 
 // retryDelay calculates the delay before the next retry attempt.
-// Uses fixed intervals from job config, falling back to a default.
+// Hierarchy: job-level intervals → pool-level backoff policy → default 10s fixed.
 func (p *pool) retryDelay(job *Job, retryCount int) time.Duration {
+	// Job-level intervals (highest priority)
 	if len(job.RetryIntervals) > 0 {
 		idx := retryCount - 1
 		if idx >= len(job.RetryIntervals) {
@@ -379,8 +491,54 @@ func (p *pool) retryDelay(job *Job, retryCount int) time.Duration {
 		}
 		return time.Duration(job.RetryIntervals[idx]) * time.Second
 	}
-	// Default: 10 seconds fixed interval
-	return 10 * time.Second
+
+	// Pool-level retry policy
+	if rp := p.cfg.retryPolicy; rp != nil {
+		return p.poolRetryDelay(rp, retryCount)
+	}
+
+	// Global default
+	return defaultRetryDelay
+}
+
+// poolRetryDelay calculates delay based on the pool's retry policy.
+func (p *pool) poolRetryDelay(rp *RetryPolicy, retryCount int) time.Duration {
+	switch rp.Backoff {
+	case BackoffExponential:
+		base := rp.BackoffBase
+		if base <= 0 {
+			base = defaultRetryDelay
+		}
+		// base * 2^(attempt-1)
+		delay := base
+		for i := 1; i < retryCount; i++ {
+			delay *= 2
+			if rp.BackoffMax > 0 && delay > rp.BackoffMax {
+				delay = rp.BackoffMax
+				break
+			}
+		}
+		return delay
+
+	case BackoffCustom:
+		if len(rp.Intervals) > 0 {
+			idx := retryCount - 1
+			if idx >= len(rp.Intervals) {
+				idx = len(rp.Intervals) - 1
+			}
+			return time.Duration(rp.Intervals[idx]) * time.Second
+		}
+		if rp.BackoffBase > 0 {
+			return rp.BackoffBase
+		}
+		return defaultRetryDelay
+
+	default: // BackoffFixed or empty
+		if rp.BackoffBase > 0 {
+			return rp.BackoffBase
+		}
+		return defaultRetryDelay
+	}
 }
 
 // heartbeatLoop runs the heartbeat goroutine for this pool.
@@ -412,7 +570,7 @@ func (p *pool) sendHeartbeat(ctx context.Context) {
 	pipe.HSet(ctx, workerKey,
 		"id", p.cfg.name,
 		"pool", p.cfg.name,
-		"queue", p.cfg.queue,
+		"queues", strings.Join(p.cfg.queues, ","),
 		"status", "active",
 		"last_heartbeat", now,
 		"concurrency", p.cfg.concurrency,

@@ -3,6 +3,7 @@ package gqm
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -56,6 +57,46 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, payload Payload, o
 	}
 
 	return job, nil
+}
+
+// EnqueueAt creates a new job scheduled for execution at the given time.
+// The job is placed in the scheduled sorted set and will be moved to the
+// ready queue by the scheduler when the time arrives.
+func (c *Client) EnqueueAt(ctx context.Context, at time.Time, jobType string, payload Payload, opts ...EnqueueOption) (*Job, error) {
+	if jobType == "" {
+		return nil, ErrInvalidJobType
+	}
+
+	job := NewJob(jobType, payload)
+	for _, opt := range opts {
+		opt(job)
+	}
+	job.Status = StatusScheduled
+	job.ScheduledAt = at.UnixNano()
+
+	jobMap, err := job.ToMap()
+	if err != nil {
+		return nil, fmt.Errorf("converting job to map: %w", err)
+	}
+
+	jobKey := c.rc.Key("job", job.ID)
+	scheduledKey := c.rc.Key("scheduled")
+	queuesKey := c.rc.Key("queues")
+
+	pipe := c.rc.rdb.Pipeline()
+	pipe.HSet(ctx, jobKey, jobMap)
+	pipe.ZAdd(ctx, scheduledKey, redis.Z{Score: float64(at.Unix()), Member: job.ID})
+	pipe.SAdd(ctx, queuesKey, job.Queue)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("scheduling job %s: %w", job.ID, err)
+	}
+
+	return job, nil
+}
+
+// EnqueueIn creates a new job scheduled for execution after the given delay.
+func (c *Client) EnqueueIn(ctx context.Context, delay time.Duration, jobType string, payload Payload, opts ...EnqueueOption) (*Job, error) {
+	return c.EnqueueAt(ctx, time.Now().Add(delay), jobType, payload, opts...)
 }
 
 // GetJob retrieves a job by ID from Redis.

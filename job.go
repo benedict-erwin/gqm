@@ -9,6 +9,7 @@ import (
 // Job status constants.
 const (
 	StatusReady      = "ready"
+	StatusScheduled  = "scheduled"
 	StatusProcessing = "processing"
 	StatusCompleted  = "completed"
 	StatusFailed     = "failed"
@@ -34,6 +35,7 @@ type Job struct {
 	RetryIntervals    []int         `json:"retry_intervals,omitempty"`
 	Timeout           int           `json:"timeout,omitempty"`
 	CreatedAt         int64         `json:"created_at"`
+	ScheduledAt       int64         `json:"scheduled_at,omitempty"`
 	StartedAt         int64         `json:"started_at,omitempty"`
 	CompletedAt       int64         `json:"completed_at,omitempty"`
 	WorkerID          string        `json:"worker_id,omitempty"`
@@ -102,9 +104,10 @@ func (j *Job) ToMap() (map[string]any, error) {
 		"retry_count":  j.RetryCount,
 		"max_retry":    j.MaxRetry,
 		"timeout":      j.Timeout,
-		"created_at":   j.CreatedAt,
-		"started_at":   j.StartedAt,
-		"completed_at": j.CompletedAt,
+		"created_at":    j.CreatedAt,
+		"scheduled_at":  j.ScheduledAt,
+		"started_at":    j.StartedAt,
+		"completed_at":  j.CompletedAt,
 	}
 
 	if j.Result != nil {
@@ -177,6 +180,7 @@ func JobFromMap(m map[string]string) (*Job, error) {
 	j.MaxRetry = parseInt(m["max_retry"])
 	j.Timeout = parseInt(m["timeout"])
 	j.CreatedAt = parseInt64(m["created_at"])
+	j.ScheduledAt = parseInt64(m["scheduled_at"])
 	j.StartedAt = parseInt64(m["started_at"])
 	j.CompletedAt = parseInt64(m["completed_at"])
 	j.LastHeartbeat = parseInt64(m["last_heartbeat"])
