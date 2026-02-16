@@ -1,0 +1,377 @@
+package gqm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// --- Queue Pause ---
+
+// PauseQueue pauses a queue. Workers will stop dequeuing from the paused queue
+// but in-flight jobs continue to completion. New jobs can still be enqueued.
+func (s *Server) PauseQueue(ctx context.Context, queue string) error {
+	return s.rc.rdb.SAdd(ctx, s.rc.Key("paused"), queue).Err()
+}
+
+// ResumeQueue resumes a paused queue. Workers will start dequeuing again.
+func (s *Server) ResumeQueue(ctx context.Context, queue string) error {
+	return s.rc.rdb.SRem(ctx, s.rc.Key("paused"), queue).Err()
+}
+
+// IsQueuePaused returns whether the given queue is paused.
+func (s *Server) IsQueuePaused(ctx context.Context, queue string) (bool, error) {
+	return s.rc.rdb.SIsMember(ctx, s.rc.Key("paused"), queue).Result()
+}
+
+// --- Job Operations ---
+
+// RetryJob moves a dead-letter job back to the ready queue.
+// Only jobs with status "dead_letter" can be retried.
+func (s *Server) RetryJob(ctx context.Context, jobID string) error {
+	jobKey := s.rc.Key("job", jobID)
+	data, err := s.rc.rdb.HGetAll(ctx, jobKey).Result()
+	if err != nil {
+		return fmt.Errorf("fetching job %s: %w", jobID, err)
+	}
+	if len(data) == 0 {
+		return ErrJobNotFound
+	}
+
+	status := data["status"]
+	if status != StatusDeadLetter {
+		return fmt.Errorf("gqm: cannot retry job with status %q (must be %q)", status, StatusDeadLetter)
+	}
+
+	queue := data["queue"]
+	if queue == "" {
+		queue = "default"
+	}
+
+	dlqKey := s.rc.Key("queue", queue, "dead_letter")
+	readyKey := s.rc.Key("queue", queue, "ready")
+
+	now := time.Now().Unix()
+	result := s.scripts.run(ctx, s.rc.rdb, "admin_retry",
+		[]string{dlqKey, readyKey, jobKey},
+		jobID, now,
+	)
+	if result.Err() != nil {
+		return fmt.Errorf("retrying job %s: %w", jobID, result.Err())
+	}
+
+	val, _ := result.Int64()
+	if val == 0 {
+		return fmt.Errorf("gqm: job %s not found in dead letter queue", jobID)
+	}
+
+	return nil
+}
+
+// CancelJob cancels a job that is ready, scheduled, or deferred.
+// Processing jobs cannot be canceled (handler is already running).
+func (s *Server) CancelJob(ctx context.Context, jobID string) error {
+	jobKey := s.rc.Key("job", jobID)
+	data, err := s.rc.rdb.HGetAll(ctx, jobKey).Result()
+	if err != nil {
+		return fmt.Errorf("fetching job %s: %w", jobID, err)
+	}
+	if len(data) == 0 {
+		return ErrJobNotFound
+	}
+
+	status := data["status"]
+	if status != StatusReady && status != StatusScheduled && status != StatusDeferred {
+		return fmt.Errorf("gqm: cannot cancel job with status %q (must be ready, scheduled, or deferred)", status)
+	}
+
+	queue := data["queue"]
+	if queue == "" {
+		queue = "default"
+	}
+
+	readyKey := s.rc.Key("queue", queue, "ready")
+	scheduledKey := s.rc.Key("scheduled")
+	deferredKey := s.rc.Key("deferred")
+
+	now := time.Now().Unix()
+	result := s.scripts.run(ctx, s.rc.rdb, "admin_cancel",
+		[]string{jobKey, readyKey, scheduledKey, deferredKey},
+		jobID, now, status,
+	)
+	if result.Err() != nil {
+		return fmt.Errorf("canceling job %s: %w", jobID, result.Err())
+	}
+
+	val, _ := result.Int64()
+	if val == 0 {
+		return fmt.Errorf("gqm: job %s not found in expected location for status %q", jobID, status)
+	}
+
+	// DAG: if deferred, propagate cancellation to dependents.
+	if status == StatusDeferred {
+		if err := propagateFailure(ctx, s.rc, s.scripts, jobID); err != nil {
+			s.logger.Error("failed to propagate cancellation to dependents",
+				"job_id", jobID,
+				"error", err,
+			)
+		}
+	}
+
+	return nil
+}
+
+// DeleteJob removes a job completely from Redis.
+// Processing jobs cannot be deleted (return error).
+func (s *Server) DeleteJob(ctx context.Context, jobID string) error {
+	jobKey := s.rc.Key("job", jobID)
+	data, err := s.rc.rdb.HGetAll(ctx, jobKey).Result()
+	if err != nil {
+		return fmt.Errorf("fetching job %s: %w", jobID, err)
+	}
+	if len(data) == 0 {
+		return ErrJobNotFound
+	}
+
+	status := data["status"]
+	if status == StatusProcessing {
+		return fmt.Errorf("gqm: cannot delete job with status %q (currently processing)", status)
+	}
+
+	queue := data["queue"]
+	if queue == "" {
+		queue = "default"
+	}
+
+	pipe := s.rc.rdb.Pipeline()
+
+	// Remove from its current location based on status
+	switch status {
+	case StatusReady:
+		pipe.LRem(ctx, s.rc.Key("queue", queue, "ready"), 1, jobID)
+	case StatusScheduled:
+		pipe.ZRem(ctx, s.rc.Key("scheduled"), jobID)
+	case StatusDeferred:
+		pipe.SRem(ctx, s.rc.Key("deferred"), jobID)
+	case StatusCompleted:
+		pipe.ZRem(ctx, s.rc.Key("queue", queue, "completed"), jobID)
+	case StatusDeadLetter:
+		pipe.ZRem(ctx, s.rc.Key("queue", queue, "dead_letter"), jobID)
+	case StatusCanceled, StatusStopped, StatusFailed:
+		// These statuses may not have a separate set, just the hash
+	}
+
+	// Delete the job hash and DAG keys
+	pipe.Del(ctx, jobKey)
+	pipe.Del(ctx, s.rc.Key("job", jobID, "deps"))
+	pipe.Del(ctx, s.rc.Key("job", jobID, "pending_deps"))
+	pipe.Del(ctx, s.rc.Key("job", jobID, "dependents"))
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("deleting job %s: %w", jobID, err)
+	}
+
+	return nil
+}
+
+// --- Queue + DLQ Operations ---
+
+// EmptyQueue removes all pending (ready) jobs from a queue.
+// Processing, scheduled, and DLQ jobs are unaffected.
+// Returns the number of jobs removed.
+func (s *Server) EmptyQueue(ctx context.Context, queue string) (int64, error) {
+	readyKey := s.rc.Key("queue", queue, "ready")
+
+	// Get all job IDs in the ready list
+	jobIDs, err := s.rc.rdb.LRange(ctx, readyKey, 0, -1).Result()
+	if err != nil {
+		return 0, fmt.Errorf("listing ready jobs for queue %s: %w", queue, err)
+	}
+
+	if len(jobIDs) == 0 {
+		return 0, nil
+	}
+
+	pipe := s.rc.rdb.Pipeline()
+	for _, id := range jobIDs {
+		pipe.HSet(ctx, s.rc.Key("job", id), "status", StatusCanceled, "completed_at", time.Now().Unix())
+	}
+	pipe.Del(ctx, readyKey)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, fmt.Errorf("emptying queue %s: %w", queue, err)
+	}
+
+	return int64(len(jobIDs)), nil
+}
+
+// RetryAllDLQ retries all jobs in the dead letter queue for the given queue.
+// Returns the number of jobs retried.
+func (s *Server) RetryAllDLQ(ctx context.Context, queue string) (int64, error) {
+	dlqKey := s.rc.Key("queue", queue, "dead_letter")
+	readyKey := s.rc.Key("queue", queue, "ready")
+
+	jobIDs, err := s.rc.rdb.ZRange(ctx, dlqKey, 0, -1).Result()
+	if err != nil {
+		return 0, fmt.Errorf("listing DLQ jobs for queue %s: %w", queue, err)
+	}
+
+	if len(jobIDs) == 0 {
+		return 0, nil
+	}
+
+	now := time.Now().Unix()
+	var retried int64
+	for _, jobID := range jobIDs {
+		jobKey := s.rc.Key("job", jobID)
+		result := s.scripts.run(ctx, s.rc.rdb, "admin_retry",
+			[]string{dlqKey, readyKey, jobKey},
+			jobID, now,
+		)
+		if result.Err() != nil {
+			s.logger.Warn("failed to retry DLQ job", "job_id", jobID, "error", result.Err())
+			continue
+		}
+		val, _ := result.Int64()
+		if val == 1 {
+			retried++
+		}
+	}
+
+	return retried, nil
+}
+
+// ClearDLQ deletes all jobs from the dead letter queue for the given queue.
+// Job hashes and DAG keys are also removed.
+func (s *Server) ClearDLQ(ctx context.Context, queue string) (int64, error) {
+	dlqKey := s.rc.Key("queue", queue, "dead_letter")
+
+	jobIDs, err := s.rc.rdb.ZRange(ctx, dlqKey, 0, -1).Result()
+	if err != nil {
+		return 0, fmt.Errorf("listing DLQ jobs for queue %s: %w", queue, err)
+	}
+
+	if len(jobIDs) == 0 {
+		return 0, nil
+	}
+
+	pipe := s.rc.rdb.Pipeline()
+	for _, id := range jobIDs {
+		pipe.Del(ctx, s.rc.Key("job", id))
+		pipe.Del(ctx, s.rc.Key("job", id, "deps"))
+		pipe.Del(ctx, s.rc.Key("job", id, "pending_deps"))
+		pipe.Del(ctx, s.rc.Key("job", id, "dependents"))
+	}
+	pipe.Del(ctx, dlqKey)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, fmt.Errorf("clearing DLQ for queue %s: %w", queue, err)
+	}
+
+	return int64(len(jobIDs)), nil
+}
+
+// --- Cron Operations ---
+
+// TriggerCron manually triggers a cron entry, enqueuing a job immediately.
+// Returns the new job ID. Bypasses overlap checks and cron locks (explicit user intent).
+func (s *Server) TriggerCron(ctx context.Context, cronID string) (string, error) {
+	entriesKey := s.rc.Key("cron", "entries")
+	raw, err := s.rc.rdb.HGet(ctx, entriesKey, cronID).Result()
+	if err == redis.Nil {
+		return "", fmt.Errorf("gqm: cron entry %q not found", cronID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("fetching cron entry %s: %w", cronID, err)
+	}
+
+	var entry CronEntry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		return "", fmt.Errorf("parsing cron entry %s: %w", cronID, err)
+	}
+
+	// Create and enqueue a job using the entry's config
+	job := NewJob(entry.JobType, entry.Payload)
+	job.Queue = entry.Queue
+	if job.Queue == "" {
+		job.Queue = "default"
+	}
+	if entry.Timeout > 0 {
+		job.Timeout = entry.Timeout
+	}
+	if entry.MaxRetry > 0 {
+		job.MaxRetry = entry.MaxRetry
+	}
+
+	jobMap, err := job.ToMap()
+	if err != nil {
+		return "", fmt.Errorf("converting triggered job to map: %w", err)
+	}
+
+	jobKey := s.rc.Key("job", job.ID)
+	queueKey := s.rc.Key("queue", job.Queue, "ready")
+	queuesKey := s.rc.Key("queues")
+	historyKey := s.rc.Key("cron", "history", cronID)
+	currentKey := s.rc.Key("cron", "current", cronID)
+
+	now := time.Now()
+	pipe := s.rc.rdb.Pipeline()
+	pipe.HSet(ctx, jobKey, jobMap)
+	pipe.LPush(ctx, queueKey, job.ID)
+	pipe.SAdd(ctx, queuesKey, job.Queue)
+	pipe.ZAdd(ctx, historyKey, redis.Z{Score: float64(now.Unix()), Member: job.ID})
+	pipe.ZRemRangeByRank(ctx, historyKey, 0, -1001) // Trim to last 1000 entries
+	pipe.Set(ctx, currentKey, job.ID, 0)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return "", fmt.Errorf("enqueuing triggered cron job: %w", err)
+	}
+
+	return job.ID, nil
+}
+
+// EnableCron enables a cron entry.
+func (s *Server) EnableCron(ctx context.Context, cronID string) error {
+	return s.setCronEnabled(ctx, cronID, true)
+}
+
+// DisableCron disables a cron entry.
+func (s *Server) DisableCron(ctx context.Context, cronID string) error {
+	return s.setCronEnabled(ctx, cronID, false)
+}
+
+func (s *Server) setCronEnabled(ctx context.Context, cronID string, enabled bool) error {
+	entriesKey := s.rc.Key("cron", "entries")
+	raw, err := s.rc.rdb.HGet(ctx, entriesKey, cronID).Result()
+	if err == redis.Nil {
+		return fmt.Errorf("gqm: cron entry %q not found", cronID)
+	}
+	if err != nil {
+		return fmt.Errorf("fetching cron entry %s: %w", cronID, err)
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		return fmt.Errorf("parsing cron entry %s: %w", cronID, err)
+	}
+
+	entry["enabled"] = enabled
+	entry["updated_at"] = time.Now().Unix()
+
+	updated, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("marshaling cron entry %s: %w", cronID, err)
+	}
+
+	if err := s.rc.rdb.HSet(ctx, entriesKey, cronID, string(updated)).Err(); err != nil {
+		return fmt.Errorf("updating cron entry %s: %w", cronID, err)
+	}
+
+	// Update in-memory entry if it exists (for live scheduler)
+	if e, ok := s.cronEntries[cronID]; ok {
+		e.Enabled = enabled
+		e.UpdatedAt = time.Now().Unix()
+	}
+
+	return nil
+}

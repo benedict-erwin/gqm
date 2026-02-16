@@ -36,6 +36,25 @@ func (m *Monitor) setupRoutes() {
 	m.mux.HandleFunc("GET /api/v1/stats/daily", m.requireAuth(m.handleStatsDaily))
 	m.mux.HandleFunc("GET /api/v1/stats/runtime", m.requireAuth(m.handleStatsRuntime))
 
+	// Write endpoints — Jobs
+	m.mux.HandleFunc("POST /api/v1/jobs/{id}/retry", m.requireAuth(m.handleRetryJob))
+	m.mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", m.requireAuth(m.handleCancelJob))
+	m.mux.HandleFunc("DELETE /api/v1/jobs/{id}", m.requireAuth(m.handleDeleteJob))
+	m.mux.HandleFunc("POST /api/v1/jobs/batch/retry", m.requireAuth(m.handleBatchRetry))
+	m.mux.HandleFunc("POST /api/v1/jobs/batch/delete", m.requireAuth(m.handleBatchDelete))
+
+	// Write endpoints — Queues + DLQ
+	m.mux.HandleFunc("POST /api/v1/queues/{name}/pause", m.requireAuth(m.handlePauseQueue))
+	m.mux.HandleFunc("POST /api/v1/queues/{name}/resume", m.requireAuth(m.handleResumeQueue))
+	m.mux.HandleFunc("DELETE /api/v1/queues/{name}/empty", m.requireAuth(m.handleEmptyQueue))
+	m.mux.HandleFunc("POST /api/v1/queues/{name}/dead-letter/retry-all", m.requireAuth(m.handleRetryAllDLQ))
+	m.mux.HandleFunc("DELETE /api/v1/queues/{name}/dead-letter/clear", m.requireAuth(m.handleClearDLQ))
+
+	// Write endpoints — Cron
+	m.mux.HandleFunc("POST /api/v1/cron/{id}/trigger", m.requireAuth(m.handleTriggerCron))
+	m.mux.HandleFunc("POST /api/v1/cron/{id}/enable", m.requireAuth(m.handleEnableCron))
+	m.mux.HandleFunc("POST /api/v1/cron/{id}/disable", m.requireAuth(m.handleDisableCron))
+
 	// Dashboard placeholder
 	if m.cfg.DashEnabled {
 		prefix := m.cfg.DashPathPrefix

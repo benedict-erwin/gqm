@@ -34,8 +34,8 @@ func (m *Monitor) handleStats(w http.ResponseWriter, r *http.Request) {
 			qps[i] = qPipe{
 				ready:          pipe.LLen(ctx, m.key("queue", q, "ready")),
 				processing:     pipe.ZCard(ctx, m.key("queue", q, "processing")),
-				completed:      pipe.LLen(ctx, m.key("queue", q, "completed")),
-				dlq:            pipe.LLen(ctx, m.key("queue", q, "dead_letter")),
+				completed:      pipe.ZCard(ctx, m.key("queue", q, "completed")),
+				dlq:            pipe.ZCard(ctx, m.key("queue", q, "dead_letter")),
 				processedTotal: pipe.Get(ctx, m.key("stats", q, "processed_total")),
 				failedTotal:    pipe.Get(ctx, m.key("stats", q, "failed_total")),
 			}

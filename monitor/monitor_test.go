@@ -40,7 +40,7 @@ func testMonitor(t *testing.T, cfg Config) (*Monitor, *redis.Client) {
 	t.Helper()
 	rdb := testRedisClient(t)
 	prefix := testPrefix(t)
-	m := New(rdb, prefix, testLogger(), cfg)
+	m := New(rdb, prefix, testLogger(), cfg, nil)
 	t.Cleanup(func() {
 		// Clean up test keys
 		ctx := context.Background()
@@ -731,5 +731,714 @@ func TestDLQ_ListEmpty(t *testing.T) {
 	w := doRequest(m, "GET", "/api/v1/queues/default/dead-letter", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
+	}
+}
+
+// --- Mock ServerAdmin ---
+
+type mockAdmin struct {
+	retryJobFn    func(ctx context.Context, jobID string) error
+	cancelJobFn   func(ctx context.Context, jobID string) error
+	deleteJobFn   func(ctx context.Context, jobID string) error
+	pauseQueueFn  func(ctx context.Context, queue string) error
+	resumeQueueFn func(ctx context.Context, queue string) error
+	emptyQueueFn  func(ctx context.Context, queue string) (int64, error)
+	retryAllDLQFn func(ctx context.Context, queue string) (int64, error)
+	clearDLQFn    func(ctx context.Context, queue string) (int64, error)
+	triggerCronFn func(ctx context.Context, cronID string) (string, error)
+	enableCronFn  func(ctx context.Context, cronID string) error
+	disableCronFn func(ctx context.Context, cronID string) error
+	isQueuePausedFn func(ctx context.Context, queue string) (bool, error)
+}
+
+func (m *mockAdmin) RetryJob(ctx context.Context, jobID string) error {
+	if m.retryJobFn != nil {
+		return m.retryJobFn(ctx, jobID)
+	}
+	return nil
+}
+func (m *mockAdmin) CancelJob(ctx context.Context, jobID string) error {
+	if m.cancelJobFn != nil {
+		return m.cancelJobFn(ctx, jobID)
+	}
+	return nil
+}
+func (m *mockAdmin) DeleteJob(ctx context.Context, jobID string) error {
+	if m.deleteJobFn != nil {
+		return m.deleteJobFn(ctx, jobID)
+	}
+	return nil
+}
+func (m *mockAdmin) PauseQueue(ctx context.Context, queue string) error {
+	if m.pauseQueueFn != nil {
+		return m.pauseQueueFn(ctx, queue)
+	}
+	return nil
+}
+func (m *mockAdmin) ResumeQueue(ctx context.Context, queue string) error {
+	if m.resumeQueueFn != nil {
+		return m.resumeQueueFn(ctx, queue)
+	}
+	return nil
+}
+func (m *mockAdmin) EmptyQueue(ctx context.Context, queue string) (int64, error) {
+	if m.emptyQueueFn != nil {
+		return m.emptyQueueFn(ctx, queue)
+	}
+	return 0, nil
+}
+func (m *mockAdmin) RetryAllDLQ(ctx context.Context, queue string) (int64, error) {
+	if m.retryAllDLQFn != nil {
+		return m.retryAllDLQFn(ctx, queue)
+	}
+	return 0, nil
+}
+func (m *mockAdmin) ClearDLQ(ctx context.Context, queue string) (int64, error) {
+	if m.clearDLQFn != nil {
+		return m.clearDLQFn(ctx, queue)
+	}
+	return 0, nil
+}
+func (m *mockAdmin) TriggerCron(ctx context.Context, cronID string) (string, error) {
+	if m.triggerCronFn != nil {
+		return m.triggerCronFn(ctx, cronID)
+	}
+	return "mock-job-id", nil
+}
+func (m *mockAdmin) EnableCron(ctx context.Context, cronID string) error {
+	if m.enableCronFn != nil {
+		return m.enableCronFn(ctx, cronID)
+	}
+	return nil
+}
+func (m *mockAdmin) DisableCron(ctx context.Context, cronID string) error {
+	if m.disableCronFn != nil {
+		return m.disableCronFn(ctx, cronID)
+	}
+	return nil
+}
+func (m *mockAdmin) IsQueuePaused(ctx context.Context, queue string) (bool, error) {
+	if m.isQueuePausedFn != nil {
+		return m.isQueuePausedFn(ctx, queue)
+	}
+	return false, nil
+}
+
+func testMonitorWithAdmin(t *testing.T, cfg Config, admin ServerAdmin) (*Monitor, *redis.Client) {
+	t.Helper()
+	rdb := testRedisClient(t)
+	prefix := testPrefix(t)
+	m := New(rdb, prefix, testLogger(), cfg, admin)
+	t.Cleanup(func() {
+		ctx := context.Background()
+		iter := rdb.Scan(ctx, 0, prefix+"*", 100).Iterator()
+		for iter.Next(ctx) {
+			rdb.Del(ctx, iter.Val())
+		}
+		rdb.Close()
+	})
+	return m, rdb
+}
+
+// --- Write endpoint tests: Jobs ---
+
+func TestAdminJobs_RetrySuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/jobs/j1/retry", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["ok"] != true {
+		t.Errorf("ok = %v", resp["ok"])
+	}
+	if resp["job_id"] != "j1" {
+		t.Errorf("job_id = %v", resp["job_id"])
+	}
+}
+
+func TestAdminJobs_RetryNotFound(t *testing.T) {
+	admin := &mockAdmin{
+		retryJobFn: func(_ context.Context, _ string) error {
+			return fmt.Errorf("gqm: job not found")
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/jobs/j1/retry", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestAdminJobs_CancelSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/jobs/j1/cancel", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["status"] != "canceled" {
+		t.Errorf("status = %v", resp["status"])
+	}
+}
+
+func TestAdminJobs_CancelConflict(t *testing.T) {
+	admin := &mockAdmin{
+		cancelJobFn: func(_ context.Context, _ string) error {
+			return fmt.Errorf("gqm: cannot cancel job with status \"processing\"")
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/jobs/j1/cancel", "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+}
+
+func TestAdminJobs_DeleteSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "DELETE", "/api/v1/jobs/j1", "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", w.Code)
+	}
+}
+
+func TestAdminJobs_DeleteConflict(t *testing.T) {
+	admin := &mockAdmin{
+		deleteJobFn: func(_ context.Context, _ string) error {
+			return fmt.Errorf("gqm: cannot delete job with status \"processing\"")
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "DELETE", "/api/v1/jobs/j1", "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+}
+
+func TestAdminJobs_BatchRetrySuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	body := `{"job_ids":["j1","j2","j3"]}`
+	w := doRequest(m, "POST", "/api/v1/jobs/batch/retry", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data, ok := resp.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("data type = %T", resp.Data)
+	}
+	if data["succeeded"] != float64(3) {
+		t.Errorf("succeeded = %v, want 3", data["succeeded"])
+	}
+}
+
+func TestAdminJobs_BatchRetryPartialFailure(t *testing.T) {
+	admin := &mockAdmin{
+		retryJobFn: func(_ context.Context, id string) error {
+			if id == "j2" {
+				return fmt.Errorf("gqm: job not found")
+			}
+			return nil
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	body := `{"job_ids":["j1","j2","j3"]}`
+	w := doRequest(m, "POST", "/api/v1/jobs/batch/retry", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data, _ := resp.Data.(map[string]any)
+	if data["succeeded"] != float64(2) {
+		t.Errorf("succeeded = %v, want 2", data["succeeded"])
+	}
+	if data["failed"] != float64(1) {
+		t.Errorf("failed = %v, want 1", data["failed"])
+	}
+}
+
+func TestAdminJobs_BatchRetryEmptyBody(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	body := `{"job_ids":[]}`
+	w := doRequest(m, "POST", "/api/v1/jobs/batch/retry", body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestAdminJobs_BatchDeleteSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	body := `{"job_ids":["j1","j2"]}`
+	w := doRequest(m, "POST", "/api/v1/jobs/batch/delete", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+}
+
+func TestAdminJobs_NoAdmin(t *testing.T) {
+	m, _ := testMonitor(t, Config{}) // nil admin
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/jobs/j1/retry", "")
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", w.Code)
+	}
+}
+
+// --- Write endpoint tests: Queues ---
+
+func TestAdminQueues_PauseSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/queues/email/pause", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["status"] != "paused" {
+		t.Errorf("status = %v", resp["status"])
+	}
+}
+
+func TestAdminQueues_ResumeSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/queues/email/resume", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["status"] != "active" {
+		t.Errorf("status = %v", resp["status"])
+	}
+}
+
+func TestAdminQueues_EmptySuccess(t *testing.T) {
+	admin := &mockAdmin{
+		emptyQueueFn: func(_ context.Context, _ string) (int64, error) {
+			return 42, nil
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "DELETE", "/api/v1/queues/email/empty", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["removed"] != float64(42) {
+		t.Errorf("removed = %v, want 42", resp["removed"])
+	}
+}
+
+func TestAdminQueues_PauseNoAdmin(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/queues/email/pause", "")
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", w.Code)
+	}
+}
+
+// --- Write endpoint tests: DLQ ---
+
+func TestAdminDLQ_RetryAllSuccess(t *testing.T) {
+	admin := &mockAdmin{
+		retryAllDLQFn: func(_ context.Context, _ string) (int64, error) {
+			return 10, nil
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/queues/default/dead-letter/retry-all", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["retried"] != float64(10) {
+		t.Errorf("retried = %v, want 10", resp["retried"])
+	}
+}
+
+func TestAdminDLQ_ClearSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "DELETE", "/api/v1/queues/default/dead-letter/clear", "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", w.Code)
+	}
+}
+
+// --- Write endpoint tests: Cron ---
+
+func TestAdminCron_TriggerSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/cron/daily/trigger", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["ok"] != true {
+		t.Errorf("ok = %v", resp["ok"])
+	}
+	if resp["cron_id"] != "daily" {
+		t.Errorf("cron_id = %v", resp["cron_id"])
+	}
+	if resp["job_id"] == nil || resp["job_id"] == "" {
+		t.Error("job_id should not be empty")
+	}
+}
+
+func TestAdminCron_TriggerNotFound(t *testing.T) {
+	admin := &mockAdmin{
+		triggerCronFn: func(_ context.Context, _ string) (string, error) {
+			return "", fmt.Errorf("gqm: cron entry \"x\" not found")
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/cron/x/trigger", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestAdminCron_EnableSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/cron/daily/enable", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["enabled"] != true {
+		t.Errorf("enabled = %v", resp["enabled"])
+	}
+}
+
+func TestAdminCron_DisableSuccess(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/cron/daily/disable", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["enabled"] != false {
+		t.Errorf("enabled = %v", resp["enabled"])
+	}
+}
+
+func TestAdminCron_TriggerNoAdmin(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/cron/daily/trigger", "")
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", w.Code)
+	}
+}
+
+// --- Queue Paused field ---
+
+func TestQueues_ListIncludesPaused(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	rdb.SAdd(ctx, m.key("queues"), "email")
+	rdb.LPush(ctx, m.key("queue", "email", "ready"), "j1")
+	rdb.SAdd(ctx, m.key("paused"), "email")
+
+	w := doRequest(m, "GET", "/api/v1/queues", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data, ok := resp.Data.([]any)
+	if !ok || len(data) == 0 {
+		t.Fatal("expected queue data")
+	}
+	q := data[0].(map[string]any)
+	if q["paused"] != true {
+		t.Errorf("paused = %v, want true", q["paused"])
+	}
+}
+
+func TestQueues_GetIncludesPaused(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	rdb.SAdd(ctx, m.key("queues"), "email")
+	rdb.SAdd(ctx, m.key("paused"), "email")
+
+	w := doRequest(m, "GET", "/api/v1/queues/email", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data, _ := resp.Data.(map[string]any)
+	if data["paused"] != true {
+		t.Errorf("paused = %v, want true", data["paused"])
+	}
+}
+
+// --- Sorted set data type tests (bug gqm-z7y) ---
+
+func TestQueues_ListCountsSortedSets(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	rdb.SAdd(ctx, m.key("queues"), "email")
+	rdb.LPush(ctx, m.key("queue", "email", "ready"), "j1", "j2")
+	// completed and dead_letter are sorted sets (ZADD in Lua scripts)
+	now := float64(time.Now().Unix())
+	rdb.ZAdd(ctx, m.key("queue", "email", "completed"), redis.Z{Score: now, Member: "j3"}, redis.Z{Score: now + 1, Member: "j4"}, redis.Z{Score: now + 2, Member: "j5"})
+	rdb.ZAdd(ctx, m.key("queue", "email", "dead_letter"), redis.Z{Score: now, Member: "j6"})
+
+	w := doRequest(m, "GET", "/api/v1/queues", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.([]any)
+	q := data[0].(map[string]any)
+	if ready := q["ready"].(float64); ready != 2 {
+		t.Errorf("ready = %v, want 2", ready)
+	}
+	if completed := q["completed"].(float64); completed != 3 {
+		t.Errorf("completed = %v, want 3", completed)
+	}
+	if dlq := q["dead_letter"].(float64); dlq != 1 {
+		t.Errorf("dead_letter = %v, want 1", dlq)
+	}
+}
+
+func TestQueues_GetCountsSortedSets(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	rdb.SAdd(ctx, m.key("queues"), "email")
+	now := float64(time.Now().Unix())
+	rdb.ZAdd(ctx, m.key("queue", "email", "completed"), redis.Z{Score: now, Member: "j1"}, redis.Z{Score: now + 1, Member: "j2"})
+	rdb.ZAdd(ctx, m.key("queue", "email", "dead_letter"), redis.Z{Score: now, Member: "j3"}, redis.Z{Score: now + 1, Member: "j4"}, redis.Z{Score: now + 2, Member: "j5"})
+
+	w := doRequest(m, "GET", "/api/v1/queues/email", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	if completed := data["completed"].(float64); completed != 2 {
+		t.Errorf("completed = %v, want 2", completed)
+	}
+	if dlq := data["dead_letter"].(float64); dlq != 3 {
+		t.Errorf("dead_letter = %v, want 3", dlq)
+	}
+}
+
+func TestDLQ_ListFromSortedSet(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	now := float64(time.Now().Unix())
+	rdb.ZAdd(ctx, m.key("queue", "email", "dead_letter"), redis.Z{Score: now, Member: "j1"}, redis.Z{Score: now + 1, Member: "j2"})
+	// Seed job hashes so fetchJobSummaries finds them
+	rdb.HSet(ctx, m.key("job", "j1"), "id", "j1", "status", "dead_letter", "queue", "email")
+	rdb.HSet(ctx, m.key("job", "j2"), "id", "j2", "status", "dead_letter", "queue", "email")
+
+	w := doRequest(m, "GET", "/api/v1/queues/email/dead-letter", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.([]any)
+	if len(data) != 2 {
+		t.Errorf("len(data) = %d, want 2", len(data))
+	}
+	if resp.Meta == nil || resp.Meta.Total != 2 {
+		t.Errorf("meta.total = %v, want 2", resp.Meta)
+	}
+}
+
+func TestQueueJobs_CompletedFromSortedSet(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	now := float64(time.Now().Unix())
+	rdb.ZAdd(ctx, m.key("queue", "email", "completed"), redis.Z{Score: now, Member: "j1"}, redis.Z{Score: now + 1, Member: "j2"}, redis.Z{Score: now + 2, Member: "j3"})
+	rdb.HSet(ctx, m.key("job", "j1"), "id", "j1", "status", "completed", "queue", "email")
+	rdb.HSet(ctx, m.key("job", "j2"), "id", "j2", "status", "completed", "queue", "email")
+	rdb.HSet(ctx, m.key("job", "j3"), "id", "j3", "status", "completed", "queue", "email")
+
+	w := doRequest(m, "GET", "/api/v1/queues/email/jobs?status=completed", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.([]any)
+	if len(data) != 3 {
+		t.Errorf("len(data) = %d, want 3", len(data))
+	}
+	if resp.Meta == nil || resp.Meta.Total != 3 {
+		t.Errorf("meta.total = %v, want 3", resp.Meta)
+	}
+}
+
+func TestStats_OverviewSortedSets(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	rdb.SAdd(ctx, m.key("queues"), "email")
+	now := float64(time.Now().Unix())
+	rdb.ZAdd(ctx, m.key("queue", "email", "completed"), redis.Z{Score: now, Member: "j1"}, redis.Z{Score: now + 1, Member: "j2"})
+	rdb.ZAdd(ctx, m.key("queue", "email", "dead_letter"), redis.Z{Score: now, Member: "j3"})
+
+	w := doRequest(m, "GET", "/api/v1/stats", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	if completed := data["completed"].(float64); completed != 2 {
+		t.Errorf("completed = %v, want 2", completed)
+	}
+	if dlq := data["dead_letter"].(float64); dlq != 1 {
+		t.Errorf("dead_letter = %v, want 1", dlq)
+	}
+}
+
+func TestCron_HistoryFromSortedSet(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	ts1 := float64(time.Now().Add(-2 * time.Hour).Unix())
+	ts2 := float64(time.Now().Add(-1 * time.Hour).Unix())
+	rdb.ZAdd(ctx, m.key("cron", "history", "daily"), redis.Z{Score: ts1, Member: "j1"}, redis.Z{Score: ts2, Member: "j2"})
+
+	w := doRequest(m, "GET", "/api/v1/cron/daily/history", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.([]any)
+	if len(data) != 2 {
+		t.Errorf("len(data) = %d, want 2", len(data))
+	}
+	// ZRevRange returns most recent first
+	first := data[0].(map[string]any)
+	if first["job_id"] != "j2" {
+		t.Errorf("first job_id = %v, want j2 (most recent)", first["job_id"])
+	}
+	if first["triggered_at"] == nil {
+		t.Error("triggered_at missing")
+	}
+}
+
+func TestCron_GetLastRunFromSortedSet(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	entryJSON := `{"id":"daily","schedule":"0 0 * * *","job_type":"cleanup","queue":"default","enabled":true}`
+	rdb.HSet(ctx, m.key("cron", "entries"), "daily", entryJSON)
+
+	ts := float64(time.Now().Unix())
+	rdb.ZAdd(ctx, m.key("cron", "history", "daily"), redis.Z{Score: ts, Member: "j1"})
+
+	w := doRequest(m, "GET", "/api/v1/cron/daily", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	lastRun, ok := data["last_run"].(map[string]any)
+	if !ok {
+		t.Fatal("last_run missing or wrong type")
+	}
+	if lastRun["job_id"] != "j1" {
+		t.Errorf("last_run.job_id = %v, want j1", lastRun["job_id"])
+	}
+	if lastRun["triggered_at"] == nil {
+		t.Error("last_run.triggered_at missing")
 	}
 }

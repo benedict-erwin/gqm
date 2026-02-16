@@ -59,13 +59,13 @@ func (m *Monitor) handleGetCron(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get last run timestamp from history
+	// Get last run from history (sorted set: member=jobID, score=timestamp)
 	historyKey := m.key("cron", "history", id)
-	lastRuns, err := m.rdb.LRange(ctx, historyKey, 0, 0).Result()
+	lastRuns, err := m.rdb.ZRevRangeWithScores(ctx, historyKey, 0, 0).Result()
 	if err == nil && len(lastRuns) > 0 {
-		var lastRun map[string]any
-		if json.Unmarshal([]byte(lastRuns[0]), &lastRun) == nil {
-			entry["last_run"] = lastRun
+		entry["last_run"] = map[string]any{
+			"job_id":       lastRuns[0].Member,
+			"triggered_at": int64(lastRuns[0].Score),
 		}
 	}
 
@@ -85,18 +85,18 @@ func (m *Monitor) handleCronHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	historyKey := m.key("cron", "history", id)
-	records, err := m.rdb.LRange(ctx, historyKey, 0, int64(limit-1)).Result()
+	records, err := m.rdb.ZRevRangeWithScores(ctx, historyKey, 0, int64(limit-1)).Result()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get cron history", "INTERNAL")
 		return
 	}
 
 	entries := make([]map[string]any, 0, len(records))
-	for _, raw := range records {
-		var entry map[string]any
-		if json.Unmarshal([]byte(raw), &entry) == nil {
-			entries = append(entries, entry)
-		}
+	for _, z := range records {
+		entries = append(entries, map[string]any{
+			"job_id":       z.Member,
+			"triggered_at": int64(z.Score),
+		})
 	}
 
 	writeJSON(w, http.StatusOK, response{Data: entries})

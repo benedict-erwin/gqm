@@ -27,6 +27,7 @@ func (m *Monitor) handleListQueues(w http.ResponseWriter, r *http.Request) {
 		DeadLetter     int64  `json:"dead_letter"`
 		ProcessedTotal int64  `json:"processed_total"`
 		FailedTotal    int64  `json:"failed_total"`
+		Paused         bool   `json:"paused"`
 	}
 
 	results := make([]queueInfo, 0, len(queues))
@@ -36,17 +37,20 @@ func (m *Monitor) handleListQueues(w http.ResponseWriter, r *http.Request) {
 		processing            *redis.IntCmd
 		processedTotal        *redis.StringCmd
 		failedTotal           *redis.StringCmd
+		paused                *redis.BoolCmd
 	}
 
+	pausedKey := m.key("paused")
 	pipes := make([]pipeResults, len(queues))
 	for i, q := range queues {
 		pipes[i] = pipeResults{
 			ready:          pipe.LLen(ctx, m.key("queue", q, "ready")),
 			processing:     pipe.ZCard(ctx, m.key("queue", q, "processing")),
-			completed:      pipe.LLen(ctx, m.key("queue", q, "completed")),
-			dlq:            pipe.LLen(ctx, m.key("queue", q, "dead_letter")),
+			completed:      pipe.ZCard(ctx, m.key("queue", q, "completed")),
+			dlq:            pipe.ZCard(ctx, m.key("queue", q, "dead_letter")),
 			processedTotal: pipe.Get(ctx, m.key("stats", q, "processed_total")),
 			failedTotal:    pipe.Get(ctx, m.key("stats", q, "failed_total")),
+			paused:         pipe.SIsMember(ctx, pausedKey, q),
 		}
 	}
 	pipe.Exec(ctx)
@@ -59,6 +63,7 @@ func (m *Monitor) handleListQueues(w http.ResponseWriter, r *http.Request) {
 			Processing: pr.processing.Val(),
 			Completed:  pr.completed.Val(),
 			DeadLetter: pr.dlq.Val(),
+			Paused:     pr.paused.Val(),
 		}
 		if v, err := pr.processedTotal.Int64(); err == nil {
 			qi.ProcessedTotal = v
@@ -91,10 +96,11 @@ func (m *Monitor) handleGetQueue(w http.ResponseWriter, r *http.Request) {
 	pipe := m.rdb.Pipeline()
 	ready := pipe.LLen(ctx, m.key("queue", name, "ready"))
 	processing := pipe.ZCard(ctx, m.key("queue", name, "processing"))
-	completed := pipe.LLen(ctx, m.key("queue", name, "completed"))
-	dlq := pipe.LLen(ctx, m.key("queue", name, "dead_letter"))
+	completed := pipe.ZCard(ctx, m.key("queue", name, "completed"))
+	dlq := pipe.ZCard(ctx, m.key("queue", name, "dead_letter"))
 	processedTotal := pipe.Get(ctx, m.key("stats", name, "processed_total"))
 	failedTotal := pipe.Get(ctx, m.key("stats", name, "failed_total"))
+	paused := pipe.SIsMember(ctx, m.key("paused"), name)
 	pipe.Exec(ctx)
 
 	qi := map[string]any{
@@ -105,6 +111,7 @@ func (m *Monitor) handleGetQueue(w http.ResponseWriter, r *http.Request) {
 		"dead_letter":     dlq.Val(),
 		"processed_total": int64(0),
 		"failed_total":    int64(0),
+		"paused":          paused.Val(),
 	}
 	if v, err := processedTotal.Int64(); err == nil {
 		qi["processed_total"] = v
@@ -123,23 +130,23 @@ func (m *Monitor) handleListQueueJobs(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	page, limit := pagination(r)
 
-	// Determine which list to read from
-	var listKey string
+	// Processing, completed, and dead_letter are sorted sets.
+	// Ready is a list.
 	switch status {
 	case "processing":
-		// Processing is a sorted set — handle separately
-		m.listProcessingJobs(w, r, name, page, limit)
+		m.listSortedSetJobs(w, r, m.key("queue", name, "processing"), page, limit)
 		return
 	case "completed":
-		listKey = m.key("queue", name, "completed")
+		m.listSortedSetJobs(w, r, m.key("queue", name, "completed"), page, limit)
+		return
 	case "dead_letter":
-		listKey = m.key("queue", name, "dead_letter")
-	default:
-		// Default to ready queue
-		listKey = m.key("queue", name, "ready")
+		m.listSortedSetJobs(w, r, m.key("queue", name, "dead_letter"), page, limit)
+		return
 	}
 
-	// Get total count
+	// Default to ready queue (list)
+	listKey := m.key("queue", name, "ready")
+
 	total, err := m.rdb.LLen(ctx, listKey).Result()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count jobs", "INTERNAL")
@@ -162,14 +169,13 @@ func (m *Monitor) handleListQueueJobs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// listProcessingJobs handles the processing sorted set.
-func (m *Monitor) listProcessingJobs(w http.ResponseWriter, r *http.Request, queue string, page, limit int) {
+// listSortedSetJobs handles paginated listing from a sorted set (processing, completed, dead_letter).
+func (m *Monitor) listSortedSetJobs(w http.ResponseWriter, r *http.Request, key string, page, limit int) {
 	ctx := r.Context()
-	key := m.key("queue", queue, "processing")
 
 	total, err := m.rdb.ZCard(ctx, key).Result()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to count processing jobs", "INTERNAL")
+		writeError(w, http.StatusInternalServerError, "failed to count jobs", "INTERNAL")
 		return
 	}
 
@@ -178,7 +184,7 @@ func (m *Monitor) listProcessingJobs(w http.ResponseWriter, r *http.Request, que
 
 	jobIDs, err := m.rdb.ZRange(ctx, key, start, stop).Result()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list processing jobs", "INTERNAL")
+		writeError(w, http.StatusInternalServerError, "failed to list jobs", "INTERNAL")
 		return
 	}
 

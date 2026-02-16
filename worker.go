@@ -219,9 +219,20 @@ func (p *pool) weightedOrder(n int) []int {
 }
 
 // dequeueFromQueue attempts to atomically dequeue a single job from the given queue.
-// Returns ("", nil) if the queue is empty.
+// Returns ("", nil) if the queue is empty or the queue is paused.
 func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, error) {
 	rc := p.server.rc
+
+	// Check if queue is paused (fail-open on error)
+	paused, err := rc.rdb.SIsMember(ctx, rc.Key("paused"), queue).Result()
+	if err != nil {
+		if ctx.Err() == nil {
+			p.logger.Warn("failed to check pause status", "queue", queue, "error", err)
+		}
+	}
+	if paused {
+		return "", nil
+	}
 
 	readyKey := rc.Key("queue", queue, "ready")
 	processingKey := rc.Key("queue", queue, "processing")

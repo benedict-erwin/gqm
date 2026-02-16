@@ -32,7 +32,7 @@ func (m *Monitor) handleListDLQ(w http.ResponseWriter, r *http.Request) {
 
 	dlqKey := m.key("queue", name, "dead_letter")
 
-	total, err := m.rdb.LLen(ctx, dlqKey).Result()
+	total, err := m.rdb.ZCard(ctx, dlqKey).Result()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count DLQ", "INTERNAL")
 		return
@@ -41,7 +41,7 @@ func (m *Monitor) handleListDLQ(w http.ResponseWriter, r *http.Request) {
 	start := int64((page - 1) * limit)
 	stop := start + int64(limit) - 1
 
-	jobIDs, err := m.rdb.LRange(ctx, dlqKey, start, stop).Result()
+	jobIDs, err := m.rdb.ZRange(ctx, dlqKey, start, stop).Result()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list DLQ jobs", "INTERNAL")
 		return

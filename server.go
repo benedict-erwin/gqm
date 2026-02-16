@@ -252,7 +252,7 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 				Key:  k.Key,
 			})
 		}
-		s.mon = monitor.New(rc.Unwrap(), rc.Prefix(), cfg.logger, monCfg)
+		s.mon = monitor.New(rc.Unwrap(), rc.Prefix(), cfg.logger, monCfg, s)
 	}
 
 	return s, nil
