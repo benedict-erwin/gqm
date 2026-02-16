@@ -12,11 +12,12 @@ import (
 
 // Config represents the top-level YAML configuration file.
 type Config struct {
-	Redis     RedisYAML       `yaml:"redis"`
-	App       AppConfig       `yaml:"app"`
-	Queues    []QueueDef      `yaml:"queues"`
-	Pools     []PoolYAML      `yaml:"pools"`
-	Scheduler SchedulerConfig `yaml:"scheduler"`
+	Redis      RedisYAML        `yaml:"redis"`
+	App        AppConfig        `yaml:"app"`
+	Queues     []QueueDef       `yaml:"queues"`
+	Pools      []PoolYAML       `yaml:"pools"`
+	Scheduler  SchedulerConfig  `yaml:"scheduler"`
+	Monitoring MonitoringConfig `yaml:"monitoring"`
 }
 
 // RedisYAML holds Redis connection settings from YAML.
@@ -84,6 +85,46 @@ type CronEntryYAML struct {
 	MaxRetry      int    `yaml:"max_retry"`
 	OverlapPolicy string `yaml:"overlap_policy"`
 	Enabled       *bool  `yaml:"enabled"` // nil = true
+}
+
+// MonitoringConfig holds HTTP API, auth, and dashboard settings from YAML.
+type MonitoringConfig struct {
+	Auth      AuthConfig      `yaml:"auth"`
+	API       APIConfig       `yaml:"api"`
+	Dashboard DashboardConfig `yaml:"dashboard"`
+}
+
+// AuthConfig holds authentication settings from YAML.
+type AuthConfig struct {
+	Enabled    bool       `yaml:"enabled"`
+	SessionTTL int        `yaml:"session_ttl"` // seconds, default 86400
+	Users      []UserYAML `yaml:"users"`
+}
+
+// UserYAML holds a user entry from YAML.
+type UserYAML struct {
+	Username     string `yaml:"username"`
+	PasswordHash string `yaml:"password_hash"` // bcrypt hash
+}
+
+// APIConfig holds HTTP API settings from YAML.
+type APIConfig struct {
+	Enabled bool         `yaml:"enabled"`
+	Addr    string       `yaml:"addr"` // default ":8080"
+	APIKeys []APIKeyYAML `yaml:"api_keys"`
+}
+
+// APIKeyYAML holds an API key entry from YAML.
+type APIKeyYAML struct {
+	Name string `yaml:"name"`
+	Key  string `yaml:"key"` // prefix: gqm_ak_
+}
+
+// DashboardConfig holds dashboard settings from YAML.
+type DashboardConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	PathPrefix string `yaml:"path_prefix"` // default "/dashboard"
+	CustomDir  string `yaml:"custom_dir"`
 }
 
 // LoadConfig parses YAML bytes and validates the resulting configuration.
@@ -260,6 +301,65 @@ func (c *Config) validate() error {
 		}
 	}
 
+	// Monitoring
+	if err := c.Monitoring.validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validate checks MonitoringConfig for consistency.
+func (m *MonitoringConfig) validate() error {
+	// Dashboard implies API
+	if m.Dashboard.Enabled && !m.API.Enabled {
+		m.API.Enabled = true
+	}
+
+	if !m.API.Enabled {
+		return nil // nothing to validate if API is disabled
+	}
+
+	// Apply defaults
+	if m.API.Addr == "" {
+		m.API.Addr = ":8080"
+	}
+	if m.Dashboard.Enabled && m.Dashboard.PathPrefix == "" {
+		m.Dashboard.PathPrefix = "/dashboard"
+	}
+
+	// Auth validation
+	if m.Auth.Enabled {
+		if len(m.Auth.Users) == 0 {
+			return fmt.Errorf("monitoring.auth: enabled but no users configured")
+		}
+		for i, u := range m.Auth.Users {
+			if u.Username == "" {
+				return fmt.Errorf("monitoring.auth.users[%d]: username must not be empty", i)
+			}
+			if u.PasswordHash == "" {
+				return fmt.Errorf("monitoring.auth.users[%d] %q: password_hash must not be empty", i, u.Username)
+			}
+		}
+	}
+
+	if m.Auth.SessionTTL < 0 {
+		return fmt.Errorf("monitoring.auth.session_ttl must be >= 0")
+	}
+	if m.Auth.SessionTTL == 0 {
+		m.Auth.SessionTTL = 86400 // 24 hours default
+	}
+
+	// API key validation
+	for i, k := range m.API.APIKeys {
+		if k.Name == "" {
+			return fmt.Errorf("monitoring.api.api_keys[%d]: name must not be empty", i)
+		}
+		if k.Key == "" {
+			return fmt.Errorf("monitoring.api.api_keys[%d] %q: key must not be empty", i, k.Name)
+		}
+	}
+
 	return nil
 }
 
@@ -403,6 +503,42 @@ func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 	}
 	if cfg.Scheduler.PollInterval > 0 {
 		serverOpts = append(serverOpts, WithSchedulerPollInterval(time.Duration(cfg.Scheduler.PollInterval)*time.Second))
+	}
+
+	// Monitoring
+	if cfg.Monitoring.API.Enabled {
+		serverOpts = append(serverOpts, WithAPI(true, cfg.Monitoring.API.Addr))
+	}
+	if cfg.Monitoring.Dashboard.Enabled {
+		serverOpts = append(serverOpts, WithDashboard(true))
+		if cfg.Monitoring.Dashboard.PathPrefix != "" {
+			serverOpts = append(serverOpts, WithDashboardPathPrefix(cfg.Monitoring.Dashboard.PathPrefix))
+		}
+		if cfg.Monitoring.Dashboard.CustomDir != "" {
+			serverOpts = append(serverOpts, WithDashboardDir(cfg.Monitoring.Dashboard.CustomDir))
+		}
+	}
+	if cfg.Monitoring.Auth.Enabled {
+		serverOpts = append(serverOpts, WithAuthEnabled(true))
+	}
+	// Pass auth users, session TTL, and API keys via inline option
+	mon := cfg.Monitoring
+	if mon.API.Enabled {
+		serverOpts = append(serverOpts, func(sc *serverConfig) {
+			sc.authSessionTTL = mon.Auth.SessionTTL
+			for _, u := range mon.Auth.Users {
+				sc.authUsers = append(sc.authUsers, AuthUser{
+					Username:     u.Username,
+					PasswordHash: u.PasswordHash,
+				})
+			}
+			for _, k := range mon.API.APIKeys {
+				sc.apiKeys = append(sc.apiKeys, AuthAPIKey{
+					Name: k.Name,
+					Key:  k.Key,
+				})
+			}
+		})
 	}
 
 	// Detect catch-all pool

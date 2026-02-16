@@ -72,6 +72,11 @@ func (rc *RedisClient) Unwrap() *redis.Client {
 	return rc.rdb
 }
 
+// Prefix returns the key prefix used by this client.
+func (rc *RedisClient) Prefix() string {
+	return rc.prefix
+}
+
 // RedisOption configures a RedisConfig.
 type RedisOption func(*RedisConfig)
 

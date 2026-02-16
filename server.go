@@ -10,7 +10,21 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/benedict-erwin/gqm/monitor"
 )
+
+// AuthUser represents a user for the monitoring API.
+type AuthUser struct {
+	Username     string
+	PasswordHash string // bcrypt hash
+}
+
+// AuthAPIKey represents an API key for programmatic access.
+type AuthAPIKey struct {
+	Name string
+	Key  string
+}
 
 // ServerOption configures a Server.
 type ServerOption func(*serverConfig)
@@ -28,6 +42,17 @@ type serverConfig struct {
 	schedulerPollInterval time.Duration // poll interval for scheduled/cron jobs
 	logLevel              string        // auto-create logger if no WithLogger (debug/info/warn/error)
 	catchAllPool          string        // pool name with job_types: ["*"]
+
+	// Phase 6: monitoring
+	apiEnabled     bool
+	apiAddr        string
+	dashEnabled    bool
+	dashPathPrefix string
+	dashCustomDir  string
+	authEnabled    bool
+	authSessionTTL int        // seconds, default 86400
+	authUsers      []AuthUser // loaded from config
+	apiKeys        []AuthAPIKey
 }
 
 // WithServerRedis sets the Redis address for the server.
@@ -106,6 +131,36 @@ func WithLogLevel(level string) ServerOption {
 	return func(cfg *serverConfig) { cfg.logLevel = level }
 }
 
+// WithAPI enables the HTTP monitoring API on the given address.
+func WithAPI(enabled bool, addr string) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.apiEnabled = enabled
+		if addr != "" {
+			cfg.apiAddr = addr
+		}
+	}
+}
+
+// WithDashboard enables the web dashboard.
+func WithDashboard(enabled bool) ServerOption {
+	return func(cfg *serverConfig) { cfg.dashEnabled = enabled }
+}
+
+// WithDashboardDir sets a custom directory for serving dashboard assets.
+func WithDashboardDir(dir string) ServerOption {
+	return func(cfg *serverConfig) { cfg.dashCustomDir = dir }
+}
+
+// WithDashboardPathPrefix sets the URL prefix for the dashboard.
+func WithDashboardPathPrefix(prefix string) ServerOption {
+	return func(cfg *serverConfig) { cfg.dashPathPrefix = prefix }
+}
+
+// WithAuthEnabled enables authentication for the monitoring API.
+func WithAuthEnabled(enabled bool) ServerOption {
+	return func(cfg *serverConfig) { cfg.authEnabled = enabled }
+}
+
 // Server manages worker pools and processes jobs.
 type Server struct {
 	cfg      *serverConfig
@@ -125,6 +180,9 @@ type Server struct {
 
 	// cronEntries holds registered cron entries indexed by ID.
 	cronEntries map[string]*CronEntry
+
+	// mon holds the HTTP monitoring server (nil if API disabled).
+	mon *monitor.Monitor
 
 	mu      sync.RWMutex
 	running bool
@@ -160,7 +218,7 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		return nil, fmt.Errorf("loading lua scripts: %w", err)
 	}
 
-	return &Server{
+	s := &Server{
 		cfg:         cfg,
 		rc:          rc,
 		scripts:     sr,
@@ -170,7 +228,34 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		cronEntries: make(map[string]*CronEntry),
 		logger:      cfg.logger,
 		stopCh:      make(chan struct{}),
-	}, nil
+	}
+
+	// Initialize monitor if API is enabled
+	if cfg.apiEnabled {
+		monCfg := monitor.Config{
+			APIAddr:        cfg.apiAddr,
+			AuthEnabled:    cfg.authEnabled,
+			AuthSessionTTL: cfg.authSessionTTL,
+			DashEnabled:    cfg.dashEnabled,
+			DashPathPrefix: cfg.dashPathPrefix,
+			DashCustomDir:  cfg.dashCustomDir,
+		}
+		for _, u := range cfg.authUsers {
+			monCfg.AuthUsers = append(monCfg.AuthUsers, monitor.AuthUser{
+				Username:     u.Username,
+				PasswordHash: u.PasswordHash,
+			})
+		}
+		for _, k := range cfg.apiKeys {
+			monCfg.APIKeys = append(monCfg.APIKeys, monitor.AuthAPIKey{
+				Name: k.Name,
+				Key:  k.Key,
+			})
+		}
+		s.mon = monitor.New(rc.Unwrap(), rc.Prefix(), cfg.logger, monCfg)
+	}
+
+	return s, nil
 }
 
 // Handle registers a handler for a job type.
@@ -343,6 +428,15 @@ func (s *Server) Start(ctx context.Context) error {
 		}(p)
 	}
 
+	// Start HTTP monitor server if configured
+	if s.mon != nil {
+		go func() {
+			if err := s.mon.Start(); err != nil {
+				s.logger.Error("monitor server error", "error", err)
+			}
+		}()
+	}
+
 	// Wait for shutdown signal, context cancellation, or Stop() call.
 	select {
 	case sig := <-sigCh:
@@ -382,6 +476,15 @@ func (s *Server) Start(ctx context.Context) error {
 		case <-hardTimeout.C:
 			s.logger.Error("hard shutdown timeout reached, closing Redis with goroutines still running")
 		}
+	}
+
+	// Stop monitor server before closing Redis
+	if s.mon != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.mon.Stop(shutdownCtx); err != nil {
+			s.logger.Error("monitor server shutdown error", "error", err)
+		}
+		shutdownCancel()
 	}
 
 	s.mu.Lock()

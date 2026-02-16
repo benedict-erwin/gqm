@@ -1,0 +1,103 @@
+package monitor
+
+import (
+	"encoding/json"
+	"net/http"
+	"sort"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// handleListCron returns all registered cron entries.
+func (m *Monitor) handleListCron(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	entriesKey := m.key("cron", "entries")
+	data, err := m.rdb.HGetAll(ctx, entriesKey).Result()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list cron entries", "INTERNAL")
+		return
+	}
+
+	entries := make([]map[string]any, 0, len(data))
+	for _, raw := range data {
+		var entry map[string]any
+		if json.Unmarshal([]byte(raw), &entry) == nil {
+			entries = append(entries, entry)
+		}
+	}
+
+	// Sort by ID for deterministic output
+	sort.Slice(entries, func(i, j int) bool {
+		a, _ := entries[i]["id"].(string)
+		b, _ := entries[j]["id"].(string)
+		return a < b
+	})
+
+	writeJSON(w, http.StatusOK, response{Data: entries})
+}
+
+// handleGetCron returns a single cron entry with next/last run info.
+func (m *Monitor) handleGetCron(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+
+	entriesKey := m.key("cron", "entries")
+	raw, err := m.rdb.HGet(ctx, entriesKey, id).Result()
+	if err == redis.Nil {
+		writeError(w, http.StatusNotFound, "cron entry not found", "NOT_FOUND")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get cron entry", "INTERNAL")
+		return
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to parse cron entry", "INTERNAL")
+		return
+	}
+
+	// Get last run timestamp from history
+	historyKey := m.key("cron", "history", id)
+	lastRuns, err := m.rdb.LRange(ctx, historyKey, 0, 0).Result()
+	if err == nil && len(lastRuns) > 0 {
+		var lastRun map[string]any
+		if json.Unmarshal([]byte(lastRuns[0]), &lastRun) == nil {
+			entry["last_run"] = lastRun
+		}
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: entry})
+}
+
+// handleCronHistory returns the execution history for a cron entry.
+func (m *Monitor) handleCronHistory(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	limit := queryInt(r, "limit", 20)
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	historyKey := m.key("cron", "history", id)
+	records, err := m.rdb.LRange(ctx, historyKey, 0, int64(limit-1)).Result()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get cron history", "INTERNAL")
+		return
+	}
+
+	entries := make([]map[string]any, 0, len(records))
+	for _, raw := range records {
+		var entry map[string]any
+		if json.Unmarshal([]byte(raw), &entry) == nil {
+			entries = append(entries, entry)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: entries})
+}

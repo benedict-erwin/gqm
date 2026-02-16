@@ -1055,3 +1055,250 @@ func TestResolveLocation_FallbackUTC(t *testing.T) {
 		t.Errorf("resolveLocation = %q, want UTC", loc)
 	}
 }
+
+// --- Monitoring config validation tests ---
+
+func TestValidate_MonitoringAuthEnabledNoUsers(t *testing.T) {
+	yaml := `
+monitoring:
+  auth:
+    enabled: true
+  api:
+    enabled: true
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "no users configured") {
+		t.Errorf("expected no users error, got %v", err)
+	}
+}
+
+func TestValidate_MonitoringAuthUserEmptyUsername(t *testing.T) {
+	yaml := `
+monitoring:
+  auth:
+    enabled: true
+    users:
+      - username: ""
+        password_hash: "$2a$10$hash"
+  api:
+    enabled: true
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "username must not be empty") {
+		t.Errorf("expected username error, got %v", err)
+	}
+}
+
+func TestValidate_MonitoringAuthUserEmptyHash(t *testing.T) {
+	yaml := `
+monitoring:
+  auth:
+    enabled: true
+    users:
+      - username: admin
+        password_hash: ""
+  api:
+    enabled: true
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "password_hash must not be empty") {
+		t.Errorf("expected password_hash error, got %v", err)
+	}
+}
+
+func TestValidate_MonitoringAPIKeyEmptyName(t *testing.T) {
+	yaml := `
+monitoring:
+  api:
+    enabled: true
+    api_keys:
+      - name: ""
+        key: "gqm_ak_test"
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "name must not be empty") {
+		t.Errorf("expected API key name error, got %v", err)
+	}
+}
+
+func TestValidate_MonitoringAPIKeyEmptyKey(t *testing.T) {
+	yaml := `
+monitoring:
+  api:
+    enabled: true
+    api_keys:
+      - name: "test-key"
+        key: ""
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "key must not be empty") {
+		t.Errorf("expected API key error, got %v", err)
+	}
+}
+
+func TestValidate_MonitoringDashboardImpliesAPI(t *testing.T) {
+	yaml := `
+monitoring:
+  dashboard:
+    enabled: true
+`
+	cfg, err := LoadConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !cfg.Monitoring.API.Enabled {
+		t.Error("dashboard.enabled should auto-enable API")
+	}
+}
+
+func TestValidate_MonitoringSessionTTLDefault(t *testing.T) {
+	yaml := `
+monitoring:
+  api:
+    enabled: true
+`
+	cfg, err := LoadConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.Monitoring.Auth.SessionTTL != 86400 {
+		t.Errorf("session_ttl = %d, want 86400", cfg.Monitoring.Auth.SessionTTL)
+	}
+}
+
+func TestValidate_MonitoringAddrDefault(t *testing.T) {
+	yaml := `
+monitoring:
+  api:
+    enabled: true
+`
+	cfg, err := LoadConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.Monitoring.API.Addr != ":8080" {
+		t.Errorf("api.addr = %q, want %q", cfg.Monitoring.API.Addr, ":8080")
+	}
+}
+
+func TestValidate_MonitoringDashboardPathPrefixDefault(t *testing.T) {
+	yaml := `
+monitoring:
+  api:
+    enabled: true
+  dashboard:
+    enabled: true
+`
+	cfg, err := LoadConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.Monitoring.Dashboard.PathPrefix != "/dashboard" {
+		t.Errorf("dashboard.path_prefix = %q, want %q", cfg.Monitoring.Dashboard.PathPrefix, "/dashboard")
+	}
+}
+
+func TestValidate_MonitoringSessionTTLNegative(t *testing.T) {
+	yaml := `
+monitoring:
+  auth:
+    session_ttl: -1
+  api:
+    enabled: true
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "session_ttl") {
+		t.Errorf("expected session_ttl error, got %v", err)
+	}
+}
+
+func TestLoadConfig_ValidFullWithMonitoring(t *testing.T) {
+	yaml := `
+monitoring:
+  auth:
+    enabled: true
+    session_ttl: 3600
+    users:
+      - username: admin
+        password_hash: "$2a$10$hashhashhashhashhashhashhashhashhashhashhashhashha"
+  api:
+    enabled: true
+    addr: ":9090"
+    api_keys:
+      - name: tui-key
+        key: gqm_ak_testkey123
+  dashboard:
+    enabled: true
+    path_prefix: "/ui"
+    custom_dir: "/opt/gqm/dashboard"
+`
+	cfg, err := LoadConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if !cfg.Monitoring.Auth.Enabled {
+		t.Error("auth.enabled = false")
+	}
+	if cfg.Monitoring.Auth.SessionTTL != 3600 {
+		t.Errorf("auth.session_ttl = %d, want 3600", cfg.Monitoring.Auth.SessionTTL)
+	}
+	if len(cfg.Monitoring.Auth.Users) != 1 {
+		t.Fatalf("auth.users len = %d", len(cfg.Monitoring.Auth.Users))
+	}
+	if cfg.Monitoring.Auth.Users[0].Username != "admin" {
+		t.Errorf("auth.users[0].username = %q", cfg.Monitoring.Auth.Users[0].Username)
+	}
+
+	if !cfg.Monitoring.API.Enabled {
+		t.Error("api.enabled = false")
+	}
+	if cfg.Monitoring.API.Addr != ":9090" {
+		t.Errorf("api.addr = %q", cfg.Monitoring.API.Addr)
+	}
+	if len(cfg.Monitoring.API.APIKeys) != 1 {
+		t.Fatalf("api.api_keys len = %d", len(cfg.Monitoring.API.APIKeys))
+	}
+	if cfg.Monitoring.API.APIKeys[0].Key != "gqm_ak_testkey123" {
+		t.Errorf("api.api_keys[0].key = %q", cfg.Monitoring.API.APIKeys[0].Key)
+	}
+
+	if !cfg.Monitoring.Dashboard.Enabled {
+		t.Error("dashboard.enabled = false")
+	}
+	if cfg.Monitoring.Dashboard.PathPrefix != "/ui" {
+		t.Errorf("dashboard.path_prefix = %q", cfg.Monitoring.Dashboard.PathPrefix)
+	}
+	if cfg.Monitoring.Dashboard.CustomDir != "/opt/gqm/dashboard" {
+		t.Errorf("dashboard.custom_dir = %q", cfg.Monitoring.Dashboard.CustomDir)
+	}
+}
+
+// --- NewServerFromConfig with monitoring ---
+
+func TestNewServerFromConfig_WithMonitoring(t *testing.T) {
+	skipWithoutRedis(t)
+
+	cfg := &Config{
+		Redis: RedisYAML{Addr: testRedisAddr()},
+		Monitoring: MonitoringConfig{
+			API: APIConfig{
+				Enabled: true,
+				Addr:    ":0", // port 0 = random
+			},
+		},
+	}
+
+	server, err := NewServerFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("NewServerFromConfig() error = %v", err)
+	}
+	defer server.rc.Close()
+
+	if !server.cfg.apiEnabled {
+		t.Error("apiEnabled = false, want true")
+	}
+	if server.mon == nil {
+		t.Error("monitor should be initialized when API is enabled")
+	}
+}

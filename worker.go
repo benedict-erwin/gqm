@@ -445,6 +445,9 @@ func (p *pool) completeJob(ctx context.Context, job *Job, elapsed time.Duration)
 			"promoted", promoted,
 		)
 	}
+
+	// Stats: increment processed counters (non-blocking).
+	p.incrementStats(ctx, job.Queue, "processed")
 }
 
 // handleFailure evaluates retry policy and either retries or moves to DLQ.
@@ -555,6 +558,9 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 			"error", err,
 		)
 	}
+
+	// Stats: increment failed counters (non-blocking).
+	p.incrementStats(ctx, job.Queue, "failed")
 }
 
 // retryDelay calculates the delay before the next retry attempt.
@@ -670,5 +676,27 @@ func (p *pool) sendHeartbeat(ctx context.Context) {
 		if ctx.Err() == nil {
 			p.logger.Error("heartbeat update failed", "error", err)
 		}
+	}
+}
+
+// incrementStats updates processed/failed counters for a queue.
+// Uses a pipeline for daily (with 90-day TTL) and cumulative counters.
+// Non-blocking: logs a warning on failure but never fails the job.
+func (p *pool) incrementStats(ctx context.Context, queue, kind string) {
+	rc := p.server.rc
+	date := time.Now().UTC().Format("2006-01-02")
+	dailyKey := rc.Key("stats", queue, kind, date)
+	totalKey := rc.Key("stats", queue, kind+"_total")
+
+	pipe := rc.rdb.Pipeline()
+	pipe.Incr(ctx, dailyKey)
+	pipe.Expire(ctx, dailyKey, 90*24*time.Hour)
+	pipe.Incr(ctx, totalKey)
+	if _, err := pipe.Exec(ctx); err != nil {
+		p.logger.Warn("stats counter update failed",
+			"queue", queue,
+			"kind", kind,
+			"error", err,
+		)
 	}
 }
