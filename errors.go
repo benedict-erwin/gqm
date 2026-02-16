@@ -32,4 +32,16 @@ var (
 
 	// ErrDuplicateCronEntry is returned when a cron entry with the same ID is registered twice.
 	ErrDuplicateCronEntry = errors.New("gqm: duplicate cron entry ID")
+
+	// ErrCyclicDependency is returned when adding a dependency would create a cycle in the DAG.
+	ErrCyclicDependency = errors.New("gqm: cyclic dependency detected")
+
+	// ErrDuplicateJobID is returned when enqueueing with Unique() and a job with the same ID already exists.
+	ErrDuplicateJobID = errors.New("gqm: duplicate job ID")
+
+	// ErrInvalidQueueName is returned when a queue name contains invalid characters.
+	ErrInvalidQueueName = errors.New("gqm: invalid queue name (only alphanumeric, hyphen, underscore, dot allowed; max 128 chars)")
+
+	// ErrInvalidJobID is returned when a job ID contains invalid characters.
+	ErrInvalidJobID = errors.New("gqm: invalid job ID (only alphanumeric, hyphen, underscore, dot allowed; max 256 chars)")
 )

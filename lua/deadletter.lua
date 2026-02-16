@@ -10,9 +10,11 @@
 -- ARGV[2]: current timestamp (unix seconds)
 -- ARGV[3]: error message
 --
--- Returns: 1 on success
+-- Returns: 1 on success, 0 if job was not in processing set
 
-redis.call('ZREM', KEYS[1], ARGV[1])
+if redis.call('ZREM', KEYS[1], ARGV[1]) == 0 then
+    return 0
+end
 redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[1])
 redis.call('HSET', KEYS[3],
     'status', 'dead_letter',

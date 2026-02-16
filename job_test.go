@@ -56,6 +56,26 @@ func TestJob_EncodeDecode(t *testing.T) {
 	if decoded.Status != original.Status {
 		t.Errorf("Status = %q, want %q", decoded.Status, original.Status)
 	}
+	if decoded.Queue != original.Queue {
+		t.Errorf("Queue = %q, want %q", decoded.Queue, original.Queue)
+	}
+	if decoded.MaxRetry != original.MaxRetry {
+		t.Errorf("MaxRetry = %d, want %d", decoded.MaxRetry, original.MaxRetry)
+	}
+	if decoded.CreatedAt != original.CreatedAt {
+		t.Errorf("CreatedAt = %d, want %d", decoded.CreatedAt, original.CreatedAt)
+	}
+	if len(decoded.RetryIntervals) != len(original.RetryIntervals) {
+		t.Errorf("RetryIntervals len = %d, want %d", len(decoded.RetryIntervals), len(original.RetryIntervals))
+	}
+	for i, v := range decoded.RetryIntervals {
+		if v != original.RetryIntervals[i] {
+			t.Errorf("RetryIntervals[%d] = %d, want %d", i, v, original.RetryIntervals[i])
+		}
+	}
+	if len(decoded.Meta) == 0 {
+		t.Error("Meta should not be empty after round-trip")
+	}
 }
 
 func TestJob_Decode(t *testing.T) {
@@ -88,6 +108,9 @@ func TestJob_ToMap_FromMap_RoundTrip(t *testing.T) {
 	original.RetryIntervals = []int{5, 15, 45}
 	original.Meta = Payload{"priority": "high"}
 	original.EnqueuedBy = "api-server"
+	original.DependsOn = []string{"parent-a", "parent-b"}
+	original.AllowFailure = true
+	original.EnqueueAtFront = true
 
 	m, err := original.ToMap()
 	if err != nil {
@@ -113,12 +136,25 @@ func TestJob_ToMap_FromMap_RoundTrip(t *testing.T) {
 	if len(restored.RetryIntervals) != len(original.RetryIntervals) {
 		t.Errorf("RetryIntervals len = %d, want %d", len(restored.RetryIntervals), len(original.RetryIntervals))
 	}
+	if len(restored.Meta) == 0 {
+		t.Error("Meta should not be empty after round-trip")
+	}
+	if len(restored.DependsOn) != 2 {
+		t.Errorf("DependsOn len = %d, want 2", len(restored.DependsOn))
+	}
+	if !restored.AllowFailure {
+		t.Error("AllowFailure should be true after round-trip")
+	}
+	if !restored.EnqueueAtFront {
+		t.Error("EnqueueAtFront should be true after round-trip")
+	}
 }
 
 func TestStatusConstants(t *testing.T) {
 	statuses := []string{
-		StatusReady, StatusProcessing, StatusCompleted,
-		StatusFailed, StatusRetry, StatusDeadLetter, StatusStopped,
+		StatusReady, StatusScheduled, StatusDeferred,
+		StatusProcessing, StatusCompleted, StatusFailed,
+		StatusRetry, StatusDeadLetter, StatusStopped, StatusCanceled,
 	}
 
 	seen := make(map[string]bool)

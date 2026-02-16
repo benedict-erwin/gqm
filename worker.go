@@ -2,6 +2,7 @@ package gqm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -11,11 +12,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const (
 	// dequeueTimeout is the BLMOVE/poll timeout before looping.
 	dequeueTimeout = 5 * time.Second
+
+	// maxAbandonedHandlers is the per-pool limit for leaked handler goroutines.
+	// When reached, the pool logs a critical warning on every new abandon.
+	maxAbandonedHandlers = 100
 )
 
 // pool manages a set of worker goroutines for processing jobs.
@@ -32,6 +39,10 @@ type pool struct {
 	// rrCounter is the round-robin rotation counter, incremented atomically
 	// by each dequeue call to rotate the starting queue index.
 	rrCounter atomic.Uint64
+
+	// abandonedHandlers counts handler goroutines that were abandoned after
+	// grace period timeout. These goroutines may still be running.
+	abandonedHandlers atomic.Int64
 }
 
 func newPool(cfg *poolConfig, server *Server) *pool {
@@ -86,7 +97,7 @@ func (p *pool) workerLoop(ctx context.Context, workerIdx int) {
 		default:
 		}
 
-		jobID, err := p.dequeue(ctx)
+		jobID, queue, err := p.dequeue(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -98,17 +109,19 @@ func (p *pool) workerLoop(ctx context.Context, workerIdx int) {
 			continue
 		}
 
-		// processJob uses context.Background() for job execution so that
-		// in-flight jobs can complete during graceful shutdown.
-		// The pool context (ctx) only controls the dequeue loop.
-		p.processJob(context.Background(), workerIdx, jobID)
+		// processJob uses a dedicated context with shutdownTimeout so that
+		// in-flight jobs can complete during graceful shutdown but won't
+		// block forever if Redis becomes unreachable.
+		jobCtx, jobCancel := context.WithTimeout(context.Background(), p.server.cfg.shutdownTimeout)
+		p.processJob(jobCtx, workerIdx, jobID, queue)
+		jobCancel()
 	}
 }
 
 // dequeue attempts to dequeue a job from any of the pool's queues using the
 // configured dequeue strategy. If the selected queue is empty, remaining queues
 // are tried as fallback. If all queues are empty, sleeps for dequeueTimeout.
-func (p *pool) dequeue(ctx context.Context) (string, error) {
+func (p *pool) dequeue(ctx context.Context) (string, string, error) {
 	queues := p.cfg.queues
 
 	// Build queue visit order based on strategy
@@ -117,19 +130,21 @@ func (p *pool) dequeue(ctx context.Context) (string, error) {
 	for _, idx := range order {
 		jobID, err := p.dequeueFromQueue(ctx, queues[idx])
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if jobID != "" {
-			return jobID, nil
+			return jobID, queues[idx], nil
 		}
 	}
 
 	// No job in any queue — wait before retrying
+	timer := time.NewTimer(dequeueTimeout)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-time.After(dequeueTimeout):
-		return "", nil
+		return "", "", ctx.Err()
+	case <-timer.C:
+		return "", "", nil
 	}
 }
 
@@ -213,6 +228,10 @@ func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, erro
 	jobPrefix := rc.Key("job") + ":"
 
 	now := time.Now().Unix()
+	// Note: uses globalTimeout for the processing set deadline (stuck job detection).
+	// The actual job timeout is resolved later in processJob, but the job data isn't
+	// available at dequeue time. This means stuck job detection may take up to
+	// globalTimeout even for jobs with shorter timeouts.
 	timeout := int64(p.server.cfg.globalTimeout.Seconds())
 
 	result := p.server.scripts.run(ctx, rc.rdb, "dequeue",
@@ -221,7 +240,7 @@ func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, erro
 	)
 
 	if result.Err() != nil {
-		if result.Err().Error() == "redis: nil" {
+		if errors.Is(result.Err(), redis.Nil) {
 			return "", nil // Queue empty
 		}
 		return "", result.Err()
@@ -236,7 +255,9 @@ func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, erro
 }
 
 // processJob fetches a job, executes the handler, and updates the result.
-func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string) {
+// The queue parameter is the queue name from which the job was dequeued,
+// used as fallback when the job hash cannot be fetched.
+func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queue string) {
 	rc := p.server.rc
 
 	// Track active job
@@ -254,12 +275,20 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string) {
 	result, err := rc.rdb.HGetAll(ctx, jobKey).Result()
 	if err != nil || len(result) == 0 {
 		p.logger.Error("failed to fetch job", "job_id", jobID, "error", err)
+		// Use the dequeue source queue so ZREM targets the correct processing set.
+		failedJob := &Job{ID: jobID, Queue: queue}
+		p.handleFailure(ctx, failedJob, "failed to fetch job data", 0)
 		return
 	}
 
 	job, err := JobFromMap(result)
 	if err != nil {
 		p.logger.Error("failed to parse job", "job_id", jobID, "error", err)
+		failedJob := &Job{ID: jobID, Queue: queue}
+		if q, ok := result["queue"]; ok && q != "" {
+			failedJob.Queue = q
+		}
+		p.handleFailure(ctx, failedJob, "failed to parse job data: "+err.Error(), 0)
 		return
 	}
 
@@ -267,7 +296,7 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string) {
 	handler, ok := p.server.handlers[job.Type]
 	if !ok {
 		p.logger.Error("no handler for job type", "job_id", jobID, "type", job.Type)
-		p.failJob(ctx, job, "no handler registered for job type: "+job.Type)
+		p.handleFailure(ctx, job, "no handler registered for job type: "+job.Type, 0)
 		return
 	}
 
@@ -333,8 +362,10 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string) {
 			gracePeriod = defaultGracePeriod
 		}
 
+		graceTimer := time.NewTimer(gracePeriod)
 		select {
 		case handlerErr := <-resultCh:
+			graceTimer.Stop()
 			elapsed = time.Since(startTime)
 			if handlerErr != nil {
 				p.handleFailure(ctx, job, "timeout exceeded, handler stopped: "+handlerErr.Error(), elapsed)
@@ -342,14 +373,30 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string) {
 				// Handler completed during grace period
 				p.completeJob(ctx, job, elapsed)
 			}
-		case <-time.After(gracePeriod):
+		case <-graceTimer.C:
 			// Handler still stuck — abandon
 			elapsed = time.Since(startTime)
-			p.logger.Warn("handler abandoned after grace period",
-				"job_id", jobID,
-				"type", job.Type,
-			)
+			total := p.abandonedHandlers.Add(1)
+			if total >= maxAbandonedHandlers {
+				p.logger.Error("CRITICAL: abandoned handler limit reached, pool may be leaking goroutines",
+					"job_id", jobID,
+					"type", job.Type,
+					"abandoned_total", total,
+					"limit", maxAbandonedHandlers,
+				)
+			} else {
+				p.logger.Warn("handler abandoned after grace period",
+					"job_id", jobID,
+					"type", job.Type,
+					"abandoned_total", total,
+				)
+			}
 			p.handleFailure(ctx, job, "timeout exceeded, handler abandoned", elapsed)
+			// Drain resultCh in background to decrement counter when handler finishes.
+			go func() {
+				<-resultCh
+				p.abandonedHandlers.Add(-1)
+			}()
 		}
 	}
 }
@@ -373,26 +420,29 @@ func (p *pool) completeJob(ctx context.Context, job *Job, elapsed time.Duration)
 			"job_id", job.ID,
 			"error", result.Err(),
 		)
+		return
 	}
-}
 
-// failJob marks a job as failed without retry evaluation.
-func (p *pool) failJob(ctx context.Context, job *Job, errMsg string) {
-	rc := p.server.rc
-	now := time.Now().Unix()
-
-	processingKey := rc.Key("queue", job.Queue, "processing")
-	failedKey := rc.Key("queue", job.Queue, "failed")
-	jobKey := rc.Key("job", job.ID)
-
-	result := p.server.scripts.run(ctx, rc.rdb, "fail",
-		[]string{processingKey, failedKey, jobKey},
-		job.ID, now, errMsg, "0",
-	)
-	if result.Err() != nil {
-		p.logger.Error("failed to mark job as failed in Redis",
+	// Check Lua return value: 0 means job was not in processing set (stale/duplicate).
+	val, err := result.Int64()
+	if err != nil || val == 0 {
+		p.logger.Warn("complete script returned 0; job was not in processing set",
 			"job_id", job.ID,
-			"error", result.Err(),
+		)
+		return
+	}
+
+	// DAG: resolve dependents after successful completion.
+	promoted, err := resolveDependents(ctx, rc, p.server.scripts, job.ID)
+	if err != nil {
+		p.logger.Error("failed to resolve dependents",
+			"job_id", job.ID,
+			"error", err,
+		)
+	} else if len(promoted) > 0 {
+		p.logger.Info("DAG: promoted dependent jobs to ready",
+			"parent_job_id", job.ID,
+			"promoted", promoted,
 		)
 	}
 }
@@ -443,13 +493,22 @@ func (p *pool) retryJob(ctx context.Context, job *Job, errMsg string, newRetryCo
 			"job_id", job.ID,
 			"error", result.Err(),
 		)
-	} else {
-		p.logger.Info("job scheduled for retry",
-			"job_id", job.ID,
-			"retry_count", newRetryCount,
-			"retry_at", time.Unix(retryAt, 0),
-		)
+		return
 	}
+
+	val, err := result.Int64()
+	if err != nil || val == 0 {
+		p.logger.Warn("retry script returned 0; job was not in processing set",
+			"job_id", job.ID,
+		)
+		return
+	}
+
+	p.logger.Info("job scheduled for retry",
+		"job_id", job.ID,
+		"retry_count", newRetryCount,
+		"retry_at", time.Unix(retryAt, 0),
+	)
 }
 
 // deadLetterJob moves a job to the dead letter queue.
@@ -470,12 +529,30 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 			"job_id", job.ID,
 			"error", result.Err(),
 		)
-	} else {
-		p.logger.Warn("job moved to dead letter queue",
+		return
+	}
+
+	// Check Lua return value: 0 means job was not in processing set (stale/duplicate).
+	val, err := result.Int64()
+	if err != nil || val == 0 {
+		p.logger.Warn("deadletter script returned 0; job was not in processing set",
 			"job_id", job.ID,
-			"type", job.Type,
-			"retry_count", job.RetryCount,
-			"max_retry", job.MaxRetry,
+		)
+		return
+	}
+
+	p.logger.Warn("job moved to dead letter queue",
+		"job_id", job.ID,
+		"type", job.Type,
+		"retry_count", job.RetryCount,
+		"max_retry", job.MaxRetry,
+	)
+
+	// DAG: propagate failure to dependents.
+	if err := propagateFailure(ctx, rc, p.server.scripts, job.ID); err != nil {
+		p.logger.Error("failed to propagate failure to dependents",
+			"job_id", job.ID,
+			"error", err,
 		)
 	}
 }
@@ -576,6 +653,8 @@ func (p *pool) sendHeartbeat(ctx context.Context) {
 		"concurrency", p.cfg.concurrency,
 	)
 	pipe.SAdd(ctx, rc.Key("workers"), p.cfg.name)
+	// Set TTL so stale worker keys auto-expire on crash (3x heartbeat interval).
+	pipe.Expire(ctx, workerKey, 3*defaultHeartbeatInterval)
 
 	// Update per-job heartbeat
 	p.mu.RLock()

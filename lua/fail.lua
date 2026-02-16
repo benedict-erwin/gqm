@@ -1,4 +1,8 @@
 -- fail.lua
+-- Reserved for future manual-fail API (e.g., admin dashboard).
+-- Currently not called from Go code; all failures go through retry.lua
+-- or deadletter.lua via handleFailure.
+--
 -- Marks a job as failed: removes from processing set,
 -- adds to failed set, updates job hash.
 --
@@ -11,9 +15,11 @@
 -- ARGV[3]: error message
 -- ARGV[4]: execution duration (milliseconds)
 --
--- Returns: 1 on success
+-- Returns: 1 on success, 0 if job was not in processing set
 
-redis.call('ZREM', KEYS[1], ARGV[1])
+if redis.call('ZREM', KEYS[1], ARGV[1]) == 0 then
+    return 0
+end
 redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[1])
 redis.call('HSET', KEYS[3],
     'status', 'failed',

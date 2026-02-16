@@ -236,6 +236,34 @@ func TestClient_EnqueueIn(t *testing.T) {
 	rc.rdb.Del(ctx, rc.Key("job", job.ID), scheduledKey, rc.Key("queues"))
 }
 
+func TestClient_EnqueueAt_RejectsDependsOn(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+
+	client := &Client{rc: rc}
+
+	_, err := client.EnqueueAt(ctx, time.Now().Add(time.Hour), "test.job", Payload{},
+		DependsOn("parent-1"),
+	)
+	if err == nil {
+		t.Fatal("expected error for DependsOn with EnqueueAt, got nil")
+	}
+}
+
+func TestClient_EnqueueIn_RejectsDependsOn(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+
+	client := &Client{rc: rc}
+
+	_, err := client.EnqueueIn(ctx, 30*time.Minute, "test.job", Payload{},
+		DependsOn("parent-1"),
+	)
+	if err == nil {
+		t.Fatal("expected error for DependsOn with EnqueueIn, got nil")
+	}
+}
+
 func TestClient_GetJob_NotFound(t *testing.T) {
 	rc := testRedisClient(t)
 	ctx := context.Background()

@@ -2,8 +2,10 @@ package gqm
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 )
 
 func testRedisClient(t *testing.T) *RedisClient {
@@ -13,9 +15,10 @@ func testRedisClient(t *testing.T) *RedisClient {
 		addr = "localhost:6379"
 	}
 
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
 	rc, err := NewRedisClient(
 		WithRedisAddr(addr),
-		WithPrefix("gqm:test:"),
+		WithPrefix(prefix),
 	)
 	if err != nil {
 		t.Fatalf("creating redis client: %v", err)

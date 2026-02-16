@@ -21,6 +21,13 @@ type serverConfig struct {
 	gracePeriod     time.Duration
 	shutdownTimeout time.Duration
 	logger          *slog.Logger
+
+	// Phase 5: config-driven fields
+	defaultTimezone       string        // fallback timezone for cron entries (IANA)
+	schedulerEnabled      bool          // whether to start the scheduler goroutine
+	schedulerPollInterval time.Duration // poll interval for scheduled/cron jobs
+	logLevel              string        // auto-create logger if no WithLogger (debug/info/warn/error)
+	catchAllPool          string        // pool name with job_types: ["*"]
 }
 
 // WithServerRedis sets the Redis address for the server.
@@ -70,6 +77,35 @@ func WithLogger(l *slog.Logger) ServerOption {
 	return func(cfg *serverConfig) { cfg.logger = l }
 }
 
+// WithDefaultTimezone sets the fallback timezone (IANA name) for cron entries
+// that don't specify their own timezone. Defaults to UTC.
+func WithDefaultTimezone(tz string) ServerOption {
+	return func(cfg *serverConfig) { cfg.defaultTimezone = tz }
+}
+
+// WithSchedulerEnabled controls whether the scheduler goroutine is started.
+// Defaults to true. Set to false for worker-only instances.
+func WithSchedulerEnabled(enabled bool) ServerOption {
+	return func(cfg *serverConfig) { cfg.schedulerEnabled = enabled }
+}
+
+// WithSchedulerPollInterval sets the poll interval for the scheduler engine.
+// Defaults to 1s.
+func WithSchedulerPollInterval(d time.Duration) ServerOption {
+	return func(cfg *serverConfig) {
+		if d > 0 {
+			cfg.schedulerPollInterval = d
+		}
+	}
+}
+
+// WithLogLevel sets the log level for the auto-created logger.
+// Only takes effect if no WithLogger() is provided.
+// Valid values: "debug", "info", "warn", "error".
+func WithLogLevel(level string) ServerOption {
+	return func(cfg *serverConfig) { cfg.logLevel = level }
+}
+
 // Server manages worker pools and processes jobs.
 type Server struct {
 	cfg      *serverConfig
@@ -93,21 +129,24 @@ type Server struct {
 	mu      sync.RWMutex
 	running bool
 	stopCh  chan struct{}
+	stopOnce sync.Once
 }
 
 // NewServer creates a new Server with the given options.
 func NewServer(opts ...ServerOption) (*Server, error) {
 	cfg := &serverConfig{
-		globalTimeout:   defaultGlobalTimeout,
-		gracePeriod:     defaultGracePeriod,
-		shutdownTimeout: defaultShutdownTimeout,
+		globalTimeout:         defaultGlobalTimeout,
+		gracePeriod:           defaultGracePeriod,
+		shutdownTimeout:       defaultShutdownTimeout,
+		schedulerEnabled:      true,
+		schedulerPollInterval: defaultSchedulerPollInterval,
 	}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
 	if cfg.logger == nil {
-		cfg.logger = slog.Default()
+		cfg.logger = newLoggerFromLevel(cfg.logLevel)
 	}
 
 	rc, err := NewRedisClient(cfg.redisOpts...)
@@ -236,8 +275,8 @@ func (s *Server) Schedule(entry CronEntry) error {
 	}
 
 	now := time.Now()
-	entry.CreatedAt = now.UnixNano()
-	entry.UpdatedAt = now.UnixNano()
+	entry.CreatedAt = now.Unix()
+	entry.UpdatedAt = now.Unix()
 
 	s.cronEntries[entry.ID] = &entry
 	return nil
@@ -245,6 +284,8 @@ func (s *Server) Schedule(entry CronEntry) error {
 
 // Start begins processing jobs. It blocks until the server is stopped
 // via signal (SIGTERM/SIGINT) or the context is cancelled.
+// The server is single-use: after Stop or Start returns, create a new Server
+// instance instead of calling Start again.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.running {
@@ -279,17 +320,20 @@ func (s *Server) Start(ctx context.Context) error {
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
 
-	// Start all pools and the retry scheduler
+	// Start all pools and optionally the scheduler
 	var wg sync.WaitGroup
 
 	// Scheduler engine (handles retry/delayed jobs + cron evaluation)
-	sched := newSchedulerEngine(s)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		sched.run(ctx)
-	}()
+	if s.cfg.schedulerEnabled {
+		sched := newSchedulerEngine(s)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sched.run(ctx)
+		}()
+	}
 
 	for _, p := range s.pools {
 		wg.Add(1)
@@ -299,13 +343,16 @@ func (s *Server) Start(ctx context.Context) error {
 		}(p)
 	}
 
-	// Wait for shutdown signal or context cancellation
+	// Wait for shutdown signal, context cancellation, or Stop() call.
 	select {
 	case sig := <-sigCh:
 		s.logger.Info("received signal, initiating shutdown", "signal", sig)
 		cancel()
 	case <-ctx.Done():
 		s.logger.Info("context cancelled, initiating shutdown")
+	case <-s.stopCh:
+		s.logger.Info("Stop() called, initiating shutdown")
+		cancel()
 	}
 
 	// Graceful shutdown: wait for pools to finish within timeout
@@ -319,8 +366,22 @@ func (s *Server) Start(ctx context.Context) error {
 	case <-done:
 		s.logger.Info("all pools stopped gracefully")
 	case <-time.After(s.cfg.shutdownTimeout):
-		s.logger.Warn("shutdown timeout reached, forcing stop",
+		s.logger.Warn("shutdown timeout reached, waiting for goroutines before closing Redis",
 			"timeout", s.cfg.shutdownTimeout)
+		// Wait for goroutines to finish even after timeout, so they don't
+		// use a closed Redis connection. Hard limit capped at 10s to avoid
+		// doubling the configured shutdown timeout.
+		hardLimit := s.cfg.shutdownTimeout
+		if hardLimit > 10*time.Second {
+			hardLimit = 10 * time.Second
+		}
+		hardTimeout := time.NewTimer(hardLimit)
+		select {
+		case <-done:
+			hardTimeout.Stop()
+		case <-hardTimeout.C:
+			s.logger.Error("hard shutdown timeout reached, closing Redis with goroutines still running")
+		}
 	}
 
 	s.mu.Lock()
@@ -332,14 +393,14 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop signals the server to stop.
 func (s *Server) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.running {
+	s.stopOnce.Do(func() {
 		close(s.stopCh)
-	}
+	})
 }
 
 // ensureDefaultPool creates a "default" pool for handlers not assigned to any pool.
+// If a catch-all pool (job_types: ["*"]) is configured, unassigned handlers are
+// routed to that pool instead of creating a new default pool.
 func (s *Server) ensureDefaultPool() {
 	var unassigned []string
 	for jt := range s.handlers {
@@ -349,6 +410,18 @@ func (s *Server) ensureDefaultPool() {
 	}
 
 	if len(unassigned) == 0 {
+		return
+	}
+
+	// If a catch-all pool is configured, assign unassigned handlers to it.
+	if s.cfg.catchAllPool != "" {
+		for _, jt := range unassigned {
+			s.jobTypePool[jt] = s.cfg.catchAllPool
+		}
+		s.logger.Info("assigned unassigned handlers to catch-all pool",
+			"pool", s.cfg.catchAllPool,
+			"handlers", unassigned,
+		)
 		return
 	}
 

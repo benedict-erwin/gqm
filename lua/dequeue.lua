@@ -17,10 +17,18 @@ if not job_id then
     return nil
 end
 
+-- Guard: only process if job status is 'ready'. Prevents resurrecting
+-- canceled/completed jobs whose ID ended up in the ready queue.
+-- Also catches missing job hashes (HGET returns false/nil).
+local job_key = KEYS[3] .. job_id
+local current_status = redis.call('HGET', job_key, 'status')
+if current_status ~= 'ready' then
+    return nil
+end
+
 local deadline = tonumber(ARGV[1]) + tonumber(ARGV[2])
 redis.call('ZADD', KEYS[2], deadline, job_id)
 
-local job_key = KEYS[3] .. job_id
 redis.call('HSET', job_key,
     'status', 'processing',
     'started_at', ARGV[1],

@@ -10,12 +10,14 @@ import (
 const (
 	StatusReady      = "ready"
 	StatusScheduled  = "scheduled"
+	StatusDeferred   = "deferred"
 	StatusProcessing = "processing"
 	StatusCompleted  = "completed"
 	StatusFailed     = "failed"
 	StatusRetry      = "retry"
 	StatusDeadLetter = "dead_letter"
 	StatusStopped    = "stopped"
+	StatusCanceled   = "canceled"
 )
 
 // Payload is a type alias for job payload data.
@@ -23,26 +25,33 @@ type Payload map[string]any
 
 // Job represents a unit of work in the queue.
 type Job struct {
-	ID                string        `json:"id"`
-	Type              string        `json:"type"`
-	Queue             string        `json:"queue"`
-	Payload           Payload       `json:"payload"`
-	Status            string        `json:"status"`
+	ID                string          `json:"id"`
+	Type              string          `json:"type"`
+	Queue             string          `json:"queue"`
+	Payload           Payload         `json:"payload"`
+	Status            string          `json:"status"`
 	Result            json.RawMessage `json:"result,omitempty"`
-	Error             string        `json:"error,omitempty"`
-	RetryCount        int           `json:"retry_count"`
-	MaxRetry          int           `json:"max_retry"`
-	RetryIntervals    []int         `json:"retry_intervals,omitempty"`
-	Timeout           int           `json:"timeout,omitempty"`
-	CreatedAt         int64         `json:"created_at"`
-	ScheduledAt       int64         `json:"scheduled_at,omitempty"`
-	StartedAt         int64         `json:"started_at,omitempty"`
-	CompletedAt       int64         `json:"completed_at,omitempty"`
-	WorkerID          string        `json:"worker_id,omitempty"`
-	LastHeartbeat     int64         `json:"last_heartbeat,omitempty"`
-	ExecutionDuration int64         `json:"execution_duration,omitempty"`
-	EnqueuedBy        string        `json:"enqueued_by,omitempty"`
-	Meta              Payload       `json:"meta,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	RetryCount        int             `json:"retry_count"`
+	MaxRetry          int             `json:"max_retry"`
+	RetryIntervals    []int           `json:"retry_intervals,omitempty"`
+	Timeout           int             `json:"timeout,omitempty"`
+	CreatedAt         int64           `json:"created_at"`
+	ScheduledAt       int64           `json:"scheduled_at,omitempty"`
+	StartedAt         int64           `json:"started_at,omitempty"`
+	CompletedAt       int64           `json:"completed_at,omitempty"`
+	WorkerID          string          `json:"worker_id,omitempty"`
+	LastHeartbeat     int64           `json:"last_heartbeat,omitempty"`
+	ExecutionDuration int64           `json:"execution_duration,omitempty"`
+	EnqueuedBy        string          `json:"enqueued_by,omitempty"`
+	Meta              Payload         `json:"meta,omitempty"`
+	DependsOn         []string        `json:"depends_on,omitempty"`
+	AllowFailure      bool            `json:"allow_failure,omitempty"`
+	EnqueueAtFront    bool            `json:"enqueue_at_front,omitempty"`
+
+	// unique is a transient enqueue-time flag (not persisted to Redis).
+	// When true, Enqueue checks for existing job with same ID before creating.
+	unique bool
 }
 
 // NewJob creates a new Job with a generated UUID v7 and the given type.
@@ -54,7 +63,7 @@ func NewJob(jobType string, payload Payload) *Job {
 		Payload:   payload,
 		Status:    StatusReady,
 		MaxRetry:  3,
-		CreatedAt: time.Now().UnixNano(),
+		CreatedAt: time.Now().Unix(),
 	}
 }
 
@@ -110,18 +119,18 @@ func (j *Job) ToMap() (map[string]any, error) {
 		"completed_at":  j.CompletedAt,
 	}
 
+	// Always include error and worker_id so HSet can clear stale values on retry.
+	m["error"] = j.Error
+	m["worker_id"] = j.WorkerID
 	if j.Result != nil {
 		m["result"] = string(j.Result)
 	}
-	if j.Error != "" {
-		m["error"] = j.Error
-	}
 	if len(j.RetryIntervals) > 0 {
-		ri, _ := json.Marshal(j.RetryIntervals)
+		ri, err := json.Marshal(j.RetryIntervals)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling retry_intervals: %w", err)
+		}
 		m["retry_intervals"] = string(ri)
-	}
-	if j.WorkerID != "" {
-		m["worker_id"] = j.WorkerID
 	}
 	if j.LastHeartbeat != 0 {
 		m["last_heartbeat"] = j.LastHeartbeat
@@ -133,8 +142,24 @@ func (j *Job) ToMap() (map[string]any, error) {
 		m["enqueued_by"] = j.EnqueuedBy
 	}
 	if j.Meta != nil {
-		metaJSON, _ := json.Marshal(j.Meta)
+		metaJSON, err := json.Marshal(j.Meta)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling meta: %w", err)
+		}
 		m["meta"] = string(metaJSON)
+	}
+	if len(j.DependsOn) > 0 {
+		depsJSON, err := json.Marshal(j.DependsOn)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling depends_on: %w", err)
+		}
+		m["depends_on"] = string(depsJSON)
+	}
+	if j.AllowFailure {
+		m["allow_failure"] = "1"
+	}
+	if j.EnqueueAtFront {
+		m["enqueue_at_front"] = "1"
 	}
 
 	return m, nil
@@ -176,6 +201,12 @@ func JobFromMap(m map[string]string) (*Job, error) {
 		}
 	}
 
+	if v, ok := m["depends_on"]; ok && v != "" {
+		if err := json.Unmarshal([]byte(v), &j.DependsOn); err != nil {
+			return nil, fmt.Errorf("decoding depends_on from map: %w", err)
+		}
+	}
+
 	j.RetryCount = parseInt(m["retry_count"])
 	j.MaxRetry = parseInt(m["max_retry"])
 	j.Timeout = parseInt(m["timeout"])
@@ -185,6 +216,8 @@ func JobFromMap(m map[string]string) (*Job, error) {
 	j.CompletedAt = parseInt64(m["completed_at"])
 	j.LastHeartbeat = parseInt64(m["last_heartbeat"])
 	j.ExecutionDuration = parseInt64(m["execution_duration"])
+	j.AllowFailure = m["allow_failure"] == "1"
+	j.EnqueueAtFront = m["enqueue_at_front"] == "1"
 
 	return j, nil
 }

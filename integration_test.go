@@ -637,3 +637,184 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 		t.Errorf("completed = %d, want 1 (job should finish during graceful shutdown)", completed.Load())
 	}
 }
+
+func TestIntegration_DAG_SimpleChain(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var processed atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(2*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("dag.job", func(ctx context.Context, job *Job) error {
+		processed.Add(1)
+		return nil
+	}, Workers(2))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Enqueue parent (ready immediately).
+	parent, err := client.Enqueue(ctx, "dag.job", Payload{"role": "parent"},
+		Queue("dag.job"), JobID("dag-parent"))
+	if err != nil {
+		t.Fatalf("Enqueue parent: %v", err)
+	}
+
+	// Enqueue child (deferred, depends on parent).
+	child, err := client.Enqueue(ctx, "dag.job", Payload{"role": "child"},
+		Queue("dag.job"), JobID("dag-child"), DependsOn(parent.ID))
+	if err != nil {
+		t.Fatalf("Enqueue child: %v", err)
+	}
+
+	// Verify child starts as deferred.
+	if child.Status != StatusDeferred {
+		t.Errorf("child initial status = %q, want %q", child.Status, StatusDeferred)
+	}
+
+	// Start server.
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for both jobs to be processed.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatalf("timeout: processed = %d, want 2", processed.Load())
+		default:
+			if processed.Load() >= 2 {
+				goto done
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+done:
+	time.Sleep(300 * time.Millisecond) // let Redis update settle
+
+	// Verify child was promoted and completed.
+	fetchedChild, err := client.GetJob(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("GetJob child: %v", err)
+	}
+	if fetchedChild.Status != StatusCompleted {
+		t.Errorf("child final status = %q, want %q", fetchedChild.Status, StatusCompleted)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+func TestIntegration_DAG_FailurePropagation(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(2*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("dag.fail", func(ctx context.Context, job *Job) error {
+		return fmt.Errorf("intentional failure")
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Enqueue parent (will fail → retry → DLQ with max_retry=0).
+	parent, err := client.Enqueue(ctx, "dag.fail", Payload{},
+		Queue("dag.fail"), JobID("fail-parent"), MaxRetry(0))
+	if err != nil {
+		t.Fatalf("Enqueue parent: %v", err)
+	}
+
+	// Enqueue child (deferred, depends on parent, allow_failure=false).
+	child, err := client.Enqueue(ctx, "dag.fail", Payload{},
+		Queue("dag.fail"), JobID("fail-child"), DependsOn(parent.ID))
+	if err != nil {
+		t.Fatalf("Enqueue child: %v", err)
+	}
+
+	// Start server.
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for parent to be processed and moved to DLQ.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for parent to reach DLQ")
+		default:
+			fetched, err := client.GetJob(ctx, parent.ID)
+			if err == nil && fetched.Status == StatusDeadLetter {
+				goto done
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+done:
+	time.Sleep(300 * time.Millisecond)
+
+	// Child should be canceled due to parent failure propagation.
+	fetchedChild, err := client.GetJob(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("GetJob child: %v", err)
+	}
+	if fetchedChild.Status != StatusCanceled {
+		t.Errorf("child status = %q, want %q", fetchedChild.Status, StatusCanceled)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}

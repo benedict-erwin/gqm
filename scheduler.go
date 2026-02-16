@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	schedulerPollInterval = 1 * time.Second
-	schedulerBatchSize    = 100
-	cronLockTTL           = 60 * time.Second
+	defaultSchedulerPollInterval = 1 * time.Second
+	schedulerBatchSize           = 100
+	cronLockTTL                  = 60 * time.Second
 )
 
 // schedulerEngine handles both the scheduled job polling (retry + delayed jobs)
@@ -37,7 +37,7 @@ func newSchedulerEngine(server *Server) *schedulerEngine {
 // 2. Polls the scheduled sorted set (retry + delayed jobs)
 // 3. Evaluates cron entries and enqueues due jobs
 func (se *schedulerEngine) run(ctx context.Context) {
-	ticker := time.NewTicker(schedulerPollInterval)
+	ticker := time.NewTicker(se.server.cfg.schedulerPollInterval)
 	defer ticker.Stop()
 
 	se.logger.Debug("scheduler engine started", "instance_id", se.instanceID)
@@ -105,15 +105,21 @@ func (se *schedulerEngine) evalCron(ctx context.Context, now time.Time) {
 			continue
 		}
 
-		// Initialize NextRun on first evaluation.
+		// Initialize NextRun on first evaluation. A value of -1 means no
+		// valid next run was found; skip permanently to avoid re-evaluating
+		// every tick.
 		if entry.NextRun == 0 {
 			loc := se.resolveLocation(entry)
 			next := entry.expr.Next(now.In(loc))
 			if next.IsZero() {
+				entry.NextRun = -1
 				continue
 			}
 			entry.NextRun = next.Unix()
 			se.updateCronEntryState(ctx, entry)
+			continue
+		}
+		if entry.NextRun < 0 {
 			continue
 		}
 
@@ -152,7 +158,17 @@ func (se *schedulerEngine) acquireCronLock(ctx context.Context, entryID string) 
 // not blocked.
 func (se *schedulerEngine) releaseCronLock(ctx context.Context, entryID string) {
 	lockKey := se.server.rc.Key("cron", "lock", entryID)
-	se.server.rc.rdb.Del(ctx, lockKey)
+	// Atomic check-and-delete via Lua to prevent TOCTOU race.
+	result := se.server.scripts.run(ctx, se.server.rc.rdb, "cron_unlock",
+		[]string{lockKey},
+		se.instanceID,
+	)
+	if result.Err() != nil {
+		se.server.logger.Warn("failed to release cron lock, will expire via TTL",
+			"entry_id", entryID,
+			"error", result.Err(),
+		)
+	}
 }
 
 // checkOverlap checks whether a new cron job should be enqueued based on the
@@ -219,12 +235,29 @@ func (se *schedulerEngine) checkOverlap(ctx context.Context, entry *CronEntry) b
 	}
 }
 
-// cancelPreviousCronJob marks the previous cron job as stopped.
+// cancelPreviousCronJob marks the previous cron job as stopped and removes it from queues.
+// Note: if the job is already in StatusProcessing, the worker will not be interrupted.
+// The status is set to "stopped" in the hash but the worker already loaded the job data.
+// OverlapReplace only fully prevents overlap for jobs in ready/scheduled states.
 func (se *schedulerEngine) cancelPreviousCronJob(ctx context.Context, entryID, jobID string) {
 	rc := se.server.rc
 	jobKey := rc.Key("job", jobID)
 
-	if err := rc.rdb.HSet(ctx, jobKey, "status", StatusStopped).Err(); err != nil {
+	// Read the job's queue to know which ready list to remove from.
+	queue, _ := rc.rdb.HGet(ctx, jobKey, "queue").Result()
+	if queue == "" {
+		queue = "default"
+	}
+
+	pipe := rc.rdb.Pipeline()
+	pipe.HSet(ctx, jobKey, "status", StatusStopped)
+	// Remove from ready queue (LREM removes all occurrences).
+	pipe.LRem(ctx, rc.Key("queue", queue, "ready"), 0, jobID)
+	// Remove from scheduled set (in case it's a delayed/retry job).
+	pipe.ZRem(ctx, rc.Key("scheduled"), jobID)
+	// Remove from processing set (best-effort; worker may still be running).
+	pipe.ZRem(ctx, rc.Key("queue", queue, "processing"), jobID)
+	if _, err := pipe.Exec(ctx); err != nil {
 		if ctx.Err() == nil {
 			se.logger.Error("cancelling previous cron job",
 				"entry_id", entryID, "job_id", jobID, "error", err)
@@ -274,7 +307,8 @@ func (se *schedulerEngine) enqueueCronJob(ctx context.Context, entry *CronEntry,
 	pipe.LPush(ctx, queueKey, job.ID)
 	pipe.SAdd(ctx, queuesKey, job.Queue)
 	pipe.ZAdd(ctx, historyKey, redis.Z{Score: float64(now.Unix()), Member: job.ID})
-	pipe.Set(ctx, currentKey, job.ID, 0) // Track current job for overlap detection
+	pipe.ZRemRangeByRank(ctx, historyKey, 0, -1001) // Trim to last 1000 entries
+	pipe.Set(ctx, currentKey, job.ID, 0)             // Track current job for overlap detection
 	if _, err := pipe.Exec(ctx); err != nil {
 		if ctx.Err() == nil {
 			se.logger.Error("enqueuing cron job", "entry_id", entry.ID, "error", err)
@@ -295,7 +329,7 @@ func (se *schedulerEngine) enqueueCronJob(ctx context.Context, entry *CronEntry,
 // advanceCronSchedule updates the entry's next_run, last_run, and last_status,
 // then persists to Redis. Used after both successful enqueue and skip.
 func (se *schedulerEngine) advanceCronSchedule(ctx context.Context, entry *CronEntry, now time.Time, status string) {
-	entry.LastRun = now.UnixNano()
+	entry.LastRun = now.Unix()
 	entry.LastStatus = status
 
 	loc := se.resolveLocation(entry)
@@ -303,13 +337,13 @@ func (se *schedulerEngine) advanceCronSchedule(ctx context.Context, entry *CronE
 	if !next.IsZero() {
 		entry.NextRun = next.Unix()
 	}
-	entry.UpdatedAt = now.UnixNano()
+	entry.UpdatedAt = now.Unix()
 
 	se.updateCronEntryState(ctx, entry)
 }
 
 // resolveLocation returns the timezone location for a cron entry.
-// Falls back to UTC if no timezone is configured.
+// Fallback chain: entry.Timezone → server defaultTimezone → UTC.
 func (se *schedulerEngine) resolveLocation(entry *CronEntry) *time.Location {
 	if entry.Timezone != "" {
 		loc, err := time.LoadLocation(entry.Timezone)
@@ -317,9 +351,19 @@ func (se *schedulerEngine) resolveLocation(entry *CronEntry) *time.Location {
 			return loc
 		}
 		// Timezone was validated at registration, this shouldn't happen.
-		se.logger.Warn("invalid timezone in cron entry, falling back to UTC",
+		se.logger.Warn("invalid timezone in cron entry, falling back",
 			"entry_id", entry.ID, "timezone", entry.Timezone)
 	}
+
+	if tz := se.server.cfg.defaultTimezone; tz != "" {
+		loc, err := time.LoadLocation(tz)
+		if err == nil {
+			return loc
+		}
+		se.logger.Warn("invalid default timezone, falling back to UTC",
+			"timezone", tz)
+	}
+
 	return time.UTC
 }
 

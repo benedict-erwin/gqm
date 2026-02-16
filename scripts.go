@@ -3,6 +3,7 @@ package gqm
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/benedict-erwin/gqm/lua"
@@ -31,11 +32,14 @@ func (sr *scriptRegistry) load() error {
 			continue
 		}
 		name := entry.Name()
+		if !strings.HasSuffix(name, ".lua") {
+			continue
+		}
 		data, err := lua.Scripts.ReadFile(name)
 		if err != nil {
 			return fmt.Errorf("reading lua script %s: %w", name, err)
 		}
-		// Strip .lua extension for the key
+		// Strip .lua extension for the key.
 		key := name[:len(name)-4]
 		sr.scripts[key] = redis.NewScript(string(data))
 	}
