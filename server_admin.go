@@ -126,52 +126,46 @@ func (s *Server) CancelJob(ctx context.Context, jobID string) error {
 
 // DeleteJob removes a job completely from Redis.
 // Processing jobs cannot be deleted (return error).
+// Uses a Lua script for atomicity to prevent TOCTOU races where a job
+// transitions to "processing" between the status check and deletion.
 func (s *Server) DeleteJob(ctx context.Context, jobID string) error {
+	// We need the queue name to build the correct keys for the Lua script.
 	jobKey := s.rc.Key("job", jobID)
-	data, err := s.rc.rdb.HGetAll(ctx, jobKey).Result()
+	queue, err := s.rc.rdb.HGet(ctx, jobKey, "queue").Result()
+	if err == redis.Nil {
+		return ErrJobNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("fetching job %s: %w", jobID, err)
 	}
-	if len(data) == 0 {
-		return ErrJobNotFound
-	}
-
-	status := data["status"]
-	if status == StatusProcessing {
-		return fmt.Errorf("gqm: cannot delete job with status %q (currently processing)", status)
-	}
-
-	queue := data["queue"]
 	if queue == "" {
 		queue = "default"
 	}
 
-	pipe := s.rc.rdb.Pipeline()
-
-	// Remove from its current location based on status
-	switch status {
-	case StatusReady:
-		pipe.LRem(ctx, s.rc.Key("queue", queue, "ready"), 1, jobID)
-	case StatusScheduled:
-		pipe.ZRem(ctx, s.rc.Key("scheduled"), jobID)
-	case StatusDeferred:
-		pipe.SRem(ctx, s.rc.Key("deferred"), jobID)
-	case StatusCompleted:
-		pipe.ZRem(ctx, s.rc.Key("queue", queue, "completed"), jobID)
-	case StatusDeadLetter:
-		pipe.ZRem(ctx, s.rc.Key("queue", queue, "dead_letter"), jobID)
-	case StatusCanceled, StatusStopped, StatusFailed:
-		// These statuses may not have a separate set, just the hash
+	result := s.scripts.run(ctx, s.rc.rdb, "admin_delete",
+		[]string{
+			jobKey,
+			s.rc.Key("queue", queue, "ready"),
+			s.rc.Key("scheduled"),
+			s.rc.Key("deferred"),
+			s.rc.Key("queue", queue, "completed"),
+			s.rc.Key("queue", queue, "dead_letter"),
+			s.rc.Key("job", jobID, "deps"),
+			s.rc.Key("job", jobID, "pending_deps"),
+			s.rc.Key("job", jobID, "dependents"),
+		},
+		jobID,
+	)
+	if result.Err() != nil {
+		return fmt.Errorf("deleting job %s: %w", jobID, result.Err())
 	}
 
-	// Delete the job hash and DAG keys
-	pipe.Del(ctx, jobKey)
-	pipe.Del(ctx, s.rc.Key("job", jobID, "deps"))
-	pipe.Del(ctx, s.rc.Key("job", jobID, "pending_deps"))
-	pipe.Del(ctx, s.rc.Key("job", jobID, "dependents"))
-
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("deleting job %s: %w", jobID, err)
+	val, _ := result.Int64()
+	switch val {
+	case -1:
+		return ErrJobNotFound
+	case -2:
+		return fmt.Errorf("gqm: cannot delete job with status %q (currently processing)", StatusProcessing)
 	}
 
 	return nil
@@ -179,14 +173,23 @@ func (s *Server) DeleteJob(ctx context.Context, jobID string) error {
 
 // --- Queue + DLQ Operations ---
 
-// EmptyQueue removes all pending (ready) jobs from a queue.
+// maxBulkOps is the maximum number of jobs processed in a single bulk
+// operation (EmptyQueue, RetryAllDLQ, ClearDLQ). This prevents OOM when
+// queues contain millions of jobs. Callers can invoke repeatedly until
+// the returned count is 0.
+const maxBulkOps = 1000
+
+// EmptyQueue removes pending (ready) jobs from a queue, up to maxBulkOps at a time.
 // Processing, scheduled, and DLQ jobs are unaffected.
-// Returns the number of jobs removed.
+// Returns the number of jobs removed. Call repeatedly until 0 to drain fully.
 func (s *Server) EmptyQueue(ctx context.Context, queue string) (int64, error) {
 	readyKey := s.rc.Key("queue", queue, "ready")
 
-	// Get all job IDs in the ready list
-	jobIDs, err := s.rc.rdb.LRange(ctx, readyKey, 0, -1).Result()
+	// Atomically pop up to maxBulkOps job IDs from the ready list.
+	jobIDs, err := s.rc.rdb.LPopCount(ctx, readyKey, maxBulkOps).Result()
+	if err == redis.Nil {
+		return 0, nil
+	}
 	if err != nil {
 		return 0, fmt.Errorf("listing ready jobs for queue %s: %w", queue, err)
 	}
@@ -199,7 +202,6 @@ func (s *Server) EmptyQueue(ctx context.Context, queue string) (int64, error) {
 	for _, id := range jobIDs {
 		pipe.HSet(ctx, s.rc.Key("job", id), "status", StatusCanceled, "completed_at", time.Now().Unix())
 	}
-	pipe.Del(ctx, readyKey)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, fmt.Errorf("emptying queue %s: %w", queue, err)
 	}
@@ -207,13 +209,13 @@ func (s *Server) EmptyQueue(ctx context.Context, queue string) (int64, error) {
 	return int64(len(jobIDs)), nil
 }
 
-// RetryAllDLQ retries all jobs in the dead letter queue for the given queue.
-// Returns the number of jobs retried.
+// RetryAllDLQ retries jobs in the dead letter queue, up to maxBulkOps at a time.
+// Returns the number of jobs retried. Call repeatedly until 0 to drain fully.
 func (s *Server) RetryAllDLQ(ctx context.Context, queue string) (int64, error) {
 	dlqKey := s.rc.Key("queue", queue, "dead_letter")
 	readyKey := s.rc.Key("queue", queue, "ready")
 
-	jobIDs, err := s.rc.rdb.ZRange(ctx, dlqKey, 0, -1).Result()
+	jobIDs, err := s.rc.rdb.ZRange(ctx, dlqKey, 0, int64(maxBulkOps-1)).Result()
 	if err != nil {
 		return 0, fmt.Errorf("listing DLQ jobs for queue %s: %w", queue, err)
 	}
@@ -243,12 +245,13 @@ func (s *Server) RetryAllDLQ(ctx context.Context, queue string) (int64, error) {
 	return retried, nil
 }
 
-// ClearDLQ deletes all jobs from the dead letter queue for the given queue.
+// ClearDLQ deletes jobs from the dead letter queue, up to maxBulkOps at a time.
 // Job hashes and DAG keys are also removed.
+// Returns the number of jobs deleted. Call repeatedly until 0 to drain fully.
 func (s *Server) ClearDLQ(ctx context.Context, queue string) (int64, error) {
 	dlqKey := s.rc.Key("queue", queue, "dead_letter")
 
-	jobIDs, err := s.rc.rdb.ZRange(ctx, dlqKey, 0, -1).Result()
+	jobIDs, err := s.rc.rdb.ZRange(ctx, dlqKey, 0, int64(maxBulkOps-1)).Result()
 	if err != nil {
 		return 0, fmt.Errorf("listing DLQ jobs for queue %s: %w", queue, err)
 	}
@@ -263,8 +266,8 @@ func (s *Server) ClearDLQ(ctx context.Context, queue string) (int64, error) {
 		pipe.Del(ctx, s.rc.Key("job", id, "deps"))
 		pipe.Del(ctx, s.rc.Key("job", id, "pending_deps"))
 		pipe.Del(ctx, s.rc.Key("job", id, "dependents"))
+		pipe.ZRem(ctx, dlqKey, id)
 	}
-	pipe.Del(ctx, dlqKey)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, fmt.Errorf("clearing DLQ for queue %s: %w", queue, err)
 	}
@@ -367,11 +370,14 @@ func (s *Server) setCronEnabled(ctx context.Context, cronID string, enabled bool
 		return fmt.Errorf("updating cron entry %s: %w", cronID, err)
 	}
 
-	// Update in-memory entry if it exists (for live scheduler)
+	// Update in-memory entry if it exists (for live scheduler).
+	// Must hold cronMu to avoid data race with scheduler's evalCron.
+	s.cronMu.Lock()
 	if e, ok := s.cronEntries[cronID]; ok {
 		e.Enabled = enabled
 		e.UpdatedAt = time.Now().Unix()
 	}
+	s.cronMu.Unlock()
 
 	return nil
 }

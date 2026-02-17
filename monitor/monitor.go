@@ -26,12 +26,14 @@ type Config struct {
 type AuthUser struct {
 	Username     string
 	PasswordHash string
+	Role         string // "admin" or "viewer"; defaults to "admin" if empty
 }
 
 // AuthAPIKey represents an API key credential.
 type AuthAPIKey struct {
 	Name string
 	Key  string
+	Role string // "admin" or "viewer"; defaults to "admin" if empty
 }
 
 // ServerAdmin is the interface for write operations that the monitor delegates
@@ -62,9 +64,6 @@ type Monitor struct {
 	cfg       Config
 	admin     ServerAdmin
 	startedAt time.Time
-
-	// apiKeyMap is a fast lookup from key string to name.
-	apiKeyMap map[string]string
 }
 
 // New creates a new Monitor.
@@ -77,12 +76,6 @@ func New(rdb *redis.Client, prefix string, logger *slog.Logger, cfg Config, admi
 		logger: logger.With("component", "monitor"),
 		cfg:    cfg,
 		admin:  admin,
-	}
-
-	// Build API key lookup map
-	m.apiKeyMap = make(map[string]string, len(cfg.APIKeys))
-	for _, k := range cfg.APIKeys {
-		m.apiKeyMap[k.Key] = k.Name
 	}
 
 	m.mux = http.NewServeMux()
@@ -108,6 +101,9 @@ func New(rdb *redis.Client, prefix string, logger *slog.Logger, cfg Config, admi
 // Returns nil on graceful shutdown.
 func (m *Monitor) Start() error {
 	m.startedAt = time.Now()
+	if !m.cfg.AuthEnabled {
+		m.logger.Warn("monitor authentication is DISABLED — all endpoints are publicly accessible, enable auth for production use")
+	}
 	m.logger.Info("monitor HTTP server starting", "addr", m.server.Addr)
 	err := m.server.ListenAndServe()
 	if err == http.ErrServerClosed {

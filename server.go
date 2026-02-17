@@ -18,12 +18,14 @@ import (
 type AuthUser struct {
 	Username     string
 	PasswordHash string // bcrypt hash
+	Role         string // "admin" or "viewer"; defaults to "admin" if empty
 }
 
 // AuthAPIKey represents an API key for programmatic access.
 type AuthAPIKey struct {
 	Name string
 	Key  string
+	Role string // "admin" or "viewer"; defaults to "admin" if empty
 }
 
 // ServerOption configures a Server.
@@ -181,6 +183,12 @@ type Server struct {
 	// cronEntries holds registered cron entries indexed by ID.
 	cronEntries map[string]*CronEntry
 
+	// cronMu protects concurrent access to CronEntry fields (Enabled, UpdatedAt)
+	// between the scheduler goroutine (evalCron reader) and HTTP handlers
+	// (setCronEnabled writer). The map itself is only mutated pre-Start via
+	// Schedule(), so only field-level access needs synchronization at runtime.
+	cronMu sync.Mutex
+
 	// mon holds the HTTP monitoring server (nil if API disabled).
 	mon *monitor.Monitor
 
@@ -244,12 +252,14 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 			monCfg.AuthUsers = append(monCfg.AuthUsers, monitor.AuthUser{
 				Username:     u.Username,
 				PasswordHash: u.PasswordHash,
+				Role:         u.Role,
 			})
 		}
 		for _, k := range cfg.apiKeys {
 			monCfg.APIKeys = append(monCfg.APIKeys, monitor.AuthAPIKey{
 				Name: k.Name,
 				Key:  k.Key,
+				Role: k.Role,
 			})
 		}
 		s.mon = monitor.New(rc.Unwrap(), rc.Prefix(), cfg.logger, monCfg, s)

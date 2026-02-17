@@ -3,6 +3,7 @@ package monitor
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 )
@@ -36,24 +37,24 @@ func (m *Monitor) setupRoutes() {
 	m.mux.HandleFunc("GET /api/v1/stats/daily", m.requireAuth(m.handleStatsDaily))
 	m.mux.HandleFunc("GET /api/v1/stats/runtime", m.requireAuth(m.handleStatsRuntime))
 
-	// Write endpoints — Jobs
-	m.mux.HandleFunc("POST /api/v1/jobs/{id}/retry", m.requireAuth(m.handleRetryJob))
-	m.mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", m.requireAuth(m.handleCancelJob))
-	m.mux.HandleFunc("DELETE /api/v1/jobs/{id}", m.requireAuth(m.handleDeleteJob))
-	m.mux.HandleFunc("POST /api/v1/jobs/batch/retry", m.requireAuth(m.handleBatchRetry))
-	m.mux.HandleFunc("POST /api/v1/jobs/batch/delete", m.requireAuth(m.handleBatchDelete))
+	// Write endpoints — Jobs (require admin role)
+	m.mux.HandleFunc("POST /api/v1/jobs/{id}/retry", m.requireAuth(m.requireAdmin(m.handleRetryJob)))
+	m.mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", m.requireAuth(m.requireAdmin(m.handleCancelJob)))
+	m.mux.HandleFunc("DELETE /api/v1/jobs/{id}", m.requireAuth(m.requireAdmin(m.handleDeleteJob)))
+	m.mux.HandleFunc("POST /api/v1/jobs/batch/retry", m.requireAuth(m.requireAdmin(m.handleBatchRetry)))
+	m.mux.HandleFunc("POST /api/v1/jobs/batch/delete", m.requireAuth(m.requireAdmin(m.handleBatchDelete)))
 
-	// Write endpoints — Queues + DLQ
-	m.mux.HandleFunc("POST /api/v1/queues/{name}/pause", m.requireAuth(m.handlePauseQueue))
-	m.mux.HandleFunc("POST /api/v1/queues/{name}/resume", m.requireAuth(m.handleResumeQueue))
-	m.mux.HandleFunc("DELETE /api/v1/queues/{name}/empty", m.requireAuth(m.handleEmptyQueue))
-	m.mux.HandleFunc("POST /api/v1/queues/{name}/dead-letter/retry-all", m.requireAuth(m.handleRetryAllDLQ))
-	m.mux.HandleFunc("DELETE /api/v1/queues/{name}/dead-letter/clear", m.requireAuth(m.handleClearDLQ))
+	// Write endpoints — Queues + DLQ (require admin role)
+	m.mux.HandleFunc("POST /api/v1/queues/{name}/pause", m.requireAuth(m.requireAdmin(m.handlePauseQueue)))
+	m.mux.HandleFunc("POST /api/v1/queues/{name}/resume", m.requireAuth(m.requireAdmin(m.handleResumeQueue)))
+	m.mux.HandleFunc("DELETE /api/v1/queues/{name}/empty", m.requireAuth(m.requireAdmin(m.handleEmptyQueue)))
+	m.mux.HandleFunc("POST /api/v1/queues/{name}/dead-letter/retry-all", m.requireAuth(m.requireAdmin(m.handleRetryAllDLQ)))
+	m.mux.HandleFunc("DELETE /api/v1/queues/{name}/dead-letter/clear", m.requireAuth(m.requireAdmin(m.handleClearDLQ)))
 
-	// Write endpoints — Cron
-	m.mux.HandleFunc("POST /api/v1/cron/{id}/trigger", m.requireAuth(m.handleTriggerCron))
-	m.mux.HandleFunc("POST /api/v1/cron/{id}/enable", m.requireAuth(m.handleEnableCron))
-	m.mux.HandleFunc("POST /api/v1/cron/{id}/disable", m.requireAuth(m.handleDisableCron))
+	// Write endpoints — Cron (require admin role)
+	m.mux.HandleFunc("POST /api/v1/cron/{id}/trigger", m.requireAuth(m.requireAdmin(m.handleTriggerCron)))
+	m.mux.HandleFunc("POST /api/v1/cron/{id}/enable", m.requireAuth(m.requireAdmin(m.handleEnableCron)))
+	m.mux.HandleFunc("POST /api/v1/cron/{id}/disable", m.requireAuth(m.requireAdmin(m.handleDisableCron)))
 
 	// Dashboard placeholder
 	if m.cfg.DashEnabled {
@@ -61,8 +62,8 @@ func (m *Monitor) setupRoutes() {
 		if prefix == "" {
 			prefix = "/dashboard"
 		}
-		m.mux.HandleFunc("GET "+prefix, m.handleDashboard)
-		m.mux.HandleFunc("GET "+prefix+"/", m.handleDashboard)
+		m.mux.HandleFunc("GET "+prefix, m.requireAuth(m.handleDashboard))
+		m.mux.HandleFunc("GET "+prefix+"/", m.requireAuth(m.handleDashboard))
 	}
 }
 
@@ -124,6 +125,24 @@ func queryInt(r *http.Request, key string, def int) int {
 		return def
 	}
 	return v
+}
+
+// maxRequestBody is the maximum allowed request body size (1 MB).
+const maxRequestBody = 1 << 20
+
+// validPathParam matches safe path parameter values: alphanumeric, hyphens, underscores, dots.
+// Max length 256 chars. Rejects empty values, colons (Redis key separator), slashes, and other
+// special characters to prevent Redis key confusion.
+var validPathParam = regexp.MustCompile(`^[a-zA-Z0-9._@\-]{1,256}$`)
+
+// validatePathParam checks a path parameter value is safe to use in Redis keys.
+// Returns an empty string and writes a 400 error if invalid.
+func validatePathParam(w http.ResponseWriter, name, value string) bool {
+	if !validPathParam.MatchString(value) {
+		writeError(w, http.StatusBadRequest, name+" contains invalid characters", "BAD_REQUEST")
+		return false
+	}
+	return true
 }
 
 // handleHealth is the health check endpoint (no auth required).

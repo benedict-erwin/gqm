@@ -32,11 +32,12 @@ func (m *Monitor) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	pipe.Exec(ctx)
 
 	workers := make([]map[string]any, 0, len(workerIDs))
-	for i, cmd := range cmds {
+	for _, cmd := range cmds {
 		data, err := cmd.Result()
 		if err != nil || len(data) == 0 {
-			// Worker key expired — clean up stale set entry
-			m.rdb.SRem(ctx, m.key("workers"), workerIDs[i])
+			// Worker key expired (TTL) — skip stale entry.
+			// Stale set members are harmless (just short strings) and will be
+			// skipped on future reads. No SRem here to keep GET side-effect free.
 			continue
 		}
 		w := make(map[string]any, len(data)+1)
@@ -57,6 +58,9 @@ func (m *Monitor) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 func (m *Monitor) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if !validatePathParam(w, "id", id) {
+		return
+	}
 
 	workerKey := m.key("worker", id)
 	data, err := m.rdb.HGetAll(ctx, workerKey).Result()

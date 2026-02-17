@@ -105,6 +105,7 @@ type AuthConfig struct {
 type UserYAML struct {
 	Username     string `yaml:"username"`
 	PasswordHash string `yaml:"password_hash"` // bcrypt hash
+	Role         string `yaml:"role"`           // "admin" or "viewer"; defaults to "admin"
 }
 
 // APIConfig holds HTTP API settings from YAML.
@@ -117,7 +118,8 @@ type APIConfig struct {
 // APIKeyYAML holds an API key entry from YAML.
 type APIKeyYAML struct {
 	Name string `yaml:"name"`
-	Key  string `yaml:"key"` // prefix: gqm_ak_
+	Key  string `yaml:"key"`  // prefix: gqm_ak_
+	Role string `yaml:"role"` // "admin" or "viewer"; defaults to "admin"
 }
 
 // DashboardConfig holds dashboard settings from YAML.
@@ -340,6 +342,9 @@ func (m *MonitoringConfig) validate() error {
 			if u.PasswordHash == "" {
 				return fmt.Errorf("monitoring.auth.users[%d] %q: password_hash must not be empty", i, u.Username)
 			}
+			if u.Role != "" && u.Role != "admin" && u.Role != "viewer" {
+				return fmt.Errorf("monitoring.auth.users[%d] %q: role must be \"admin\" or \"viewer\"", i, u.Username)
+			}
 		}
 	}
 
@@ -357,6 +362,9 @@ func (m *MonitoringConfig) validate() error {
 		}
 		if k.Key == "" {
 			return fmt.Errorf("monitoring.api.api_keys[%d] %q: key must not be empty", i, k.Name)
+		}
+		if k.Role != "" && k.Role != "admin" && k.Role != "viewer" {
+			return fmt.Errorf("monitoring.api.api_keys[%d] %q: role must be \"admin\" or \"viewer\"", i, k.Name)
 		}
 	}
 
@@ -530,12 +538,14 @@ func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 				sc.authUsers = append(sc.authUsers, AuthUser{
 					Username:     u.Username,
 					PasswordHash: u.PasswordHash,
+					Role:         u.Role,
 				})
 			}
 			for _, k := range mon.API.APIKeys {
 				sc.apiKeys = append(sc.apiKeys, AuthAPIKey{
 					Name: k.Name,
 					Key:  k.Key,
+					Role: k.Role,
 				})
 			}
 		})

@@ -100,8 +100,22 @@ func (se *schedulerEngine) pollScheduled(ctx context.Context, now time.Time) {
 
 // evalCron iterates all registered cron entries and enqueues jobs that are due.
 func (se *schedulerEngine) evalCron(ctx context.Context, now time.Time) {
-	for _, entry := range se.server.cronEntries {
-		if !entry.Enabled {
+	// Snapshot entries and their Enabled state under cronMu to avoid racing
+	// with setCronEnabled which writes Enabled from HTTP handler goroutines.
+	type cronSnap struct {
+		entry   *CronEntry
+		enabled bool
+	}
+	se.server.cronMu.Lock()
+	snaps := make([]cronSnap, 0, len(se.server.cronEntries))
+	for _, e := range se.server.cronEntries {
+		snaps = append(snaps, cronSnap{entry: e, enabled: e.Enabled})
+	}
+	se.server.cronMu.Unlock()
+
+	for _, snap := range snaps {
+		entry := snap.entry
+		if !snap.enabled {
 			continue
 		}
 

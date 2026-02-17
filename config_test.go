@@ -1136,6 +1136,72 @@ monitoring:
 	}
 }
 
+func TestValidate_MonitoringUserInvalidRole(t *testing.T) {
+	yaml := `
+monitoring:
+  auth:
+    enabled: true
+    users:
+      - username: admin
+        password_hash: "$2a$10$hashhashhashhashhashhashhashhashhashhashhashhashha"
+        role: "superadmin"
+  api:
+    enabled: true
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "role must be") {
+		t.Errorf("expected role validation error, got %v", err)
+	}
+}
+
+func TestValidate_MonitoringAPIKeyInvalidRole(t *testing.T) {
+	yaml := `
+monitoring:
+  api:
+    enabled: true
+    api_keys:
+      - name: "test-key"
+        key: "gqm_ak_test"
+        role: "root"
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "role must be") {
+		t.Errorf("expected role validation error, got %v", err)
+	}
+}
+
+func TestValidate_MonitoringValidRoles(t *testing.T) {
+	yaml := `
+monitoring:
+  auth:
+    enabled: true
+    users:
+      - username: admin
+        password_hash: "$2a$10$hashhashhashhashhashhashhashhashhashhashhashhashha"
+        role: "admin"
+      - username: viewer
+        password_hash: "$2a$10$hashhashhashhashhashhashhashhashhashhashhashhashha"
+        role: "viewer"
+      - username: default
+        password_hash: "$2a$10$hashhashhashhashhashhashhashhashhashhashhashhashha"
+  api:
+    enabled: true
+    api_keys:
+      - name: admin-key
+        key: gqm_ak_admin
+        role: admin
+      - name: viewer-key
+        key: gqm_ak_viewer
+        role: viewer
+      - name: default-key
+        key: gqm_ak_default
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err != nil {
+		t.Errorf("valid roles should not error: %v", err)
+	}
+}
+
 func TestValidate_MonitoringDashboardImpliesAPI(t *testing.T) {
 	yaml := `
 monitoring:

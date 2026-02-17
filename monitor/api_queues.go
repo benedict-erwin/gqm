@@ -81,6 +81,9 @@ func (m *Monitor) handleListQueues(w http.ResponseWriter, r *http.Request) {
 func (m *Monitor) handleGetQueue(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
+	if !validatePathParam(w, "name", name) {
+		return
+	}
 
 	// Check queue exists
 	exists, err := m.rdb.SIsMember(ctx, m.key("queues"), name).Result()
@@ -127,12 +130,16 @@ func (m *Monitor) handleGetQueue(w http.ResponseWriter, r *http.Request) {
 func (m *Monitor) handleListQueueJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
+	if !validatePathParam(w, "name", name) {
+		return
+	}
 	status := r.URL.Query().Get("status")
 	page, limit := pagination(r)
 
-	// Processing, completed, and dead_letter are sorted sets.
-	// Ready is a list.
+	// Validate status parameter against known values.
 	switch status {
+	case "", "ready":
+		// fall through to ready queue below
 	case "processing":
 		m.listSortedSetJobs(w, r, m.key("queue", name, "processing"), page, limit)
 		return
@@ -142,9 +149,12 @@ func (m *Monitor) handleListQueueJobs(w http.ResponseWriter, r *http.Request) {
 	case "dead_letter":
 		m.listSortedSetJobs(w, r, m.key("queue", name, "dead_letter"), page, limit)
 		return
+	default:
+		writeError(w, http.StatusBadRequest, "invalid status parameter; must be one of: ready, processing, completed, dead_letter", "BAD_REQUEST")
+		return
 	}
 
-	// Default to ready queue (list)
+	// Ready queue (list)
 	listKey := m.key("queue", name, "ready")
 
 	total, err := m.rdb.LLen(ctx, listKey).Result()

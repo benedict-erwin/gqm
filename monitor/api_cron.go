@@ -41,6 +41,9 @@ func (m *Monitor) handleListCron(w http.ResponseWriter, r *http.Request) {
 func (m *Monitor) handleGetCron(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if !validatePathParam(w, "id", id) {
+		return
+	}
 
 	entriesKey := m.key("cron", "entries")
 	raw, err := m.rdb.HGet(ctx, entriesKey, id).Result()
@@ -76,6 +79,9 @@ func (m *Monitor) handleGetCron(w http.ResponseWriter, r *http.Request) {
 func (m *Monitor) handleCronHistory(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if !validatePathParam(w, "id", id) {
+		return
+	}
 	limit := queryInt(r, "limit", 20)
 	if limit < 1 {
 		limit = 1

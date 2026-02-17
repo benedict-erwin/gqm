@@ -12,6 +12,9 @@ import (
 func (m *Monitor) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if !validatePathParam(w, "id", id) {
+		return
+	}
 
 	jobKey := m.key("job", id)
 	data, err := m.rdb.HGetAll(ctx, jobKey).Result()
@@ -28,6 +31,9 @@ func (m *Monitor) handleGetJob(w http.ResponseWriter, r *http.Request) {
 func (m *Monitor) handleListDLQ(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
+	if !validatePathParam(w, "name", name) {
+		return
+	}
 	page, limit := pagination(r)
 
 	dlqKey := m.key("queue", name, "dead_letter")
@@ -78,11 +84,44 @@ func (m *Monitor) fetchJobSummaries(ctx context.Context, jobIDs []string) []map[
 	return jobs
 }
 
+// jobAllowedFields is the set of job hash fields that are safe to expose in
+// API responses. Fields not in this set are filtered out to prevent accidental
+// leakage of internal-only data.
+var jobAllowedFields = map[string]bool{
+	"id":                 true,
+	"type":               true,
+	"queue":              true,
+	"payload":            true,
+	"status":             true,
+	"result":             true,
+	"error":              true,
+	"retry_count":        true,
+	"max_retry":          true,
+	"retry_intervals":    true,
+	"timeout":            true,
+	"created_at":         true,
+	"scheduled_at":       true,
+	"started_at":         true,
+	"completed_at":       true,
+	"worker_id":          true,
+	"last_heartbeat":     true,
+	"execution_duration": true,
+	"enqueued_by":        true,
+	"meta":               true,
+	"depends_on":         true,
+	"allow_failure":      true,
+	"enqueue_at_front":   true,
+}
+
 // mapToJobResponse converts a Redis hash to a job response map.
+// Only includes fields in the jobAllowedFields allowlist.
 // Parses JSON fields (payload, meta, depends_on, result) into proper types.
 func mapToJobResponse(data map[string]string) map[string]any {
 	job := make(map[string]any, len(data))
 	for k, v := range data {
+		if !jobAllowedFields[k] {
+			continue
+		}
 		switch k {
 		case "payload", "meta":
 			var parsed any

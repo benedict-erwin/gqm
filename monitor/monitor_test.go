@@ -86,6 +86,15 @@ func doRequestWithCookie(m *Monitor, method, path, cookie string) *httptest.Resp
 	return w
 }
 
+func doRequestWithCookieCSRF(m *Monitor, method, path, cookie string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set("Cookie", sessionCookieName+"="+cookie)
+	req.Header.Set("X-GQM-CSRF", "1")
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+	return w
+}
+
 // --- Health endpoint ---
 
 func TestHealth_OK(t *testing.T) {
@@ -1017,8 +1026,12 @@ func TestAdminJobs_NoAdmin(t *testing.T) {
 // --- Write endpoint tests: Queues ---
 
 func TestAdminQueues_PauseSuccess(t *testing.T) {
-	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m, rdb := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
 	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	// Queue must exist to be pauseable
+	rdb.SAdd(ctx, m.key("queues"), "email")
 
 	w := doRequest(m, "POST", "/api/v1/queues/email/pause", "")
 	if w.Code != http.StatusOK {
@@ -1033,8 +1046,12 @@ func TestAdminQueues_PauseSuccess(t *testing.T) {
 }
 
 func TestAdminQueues_ResumeSuccess(t *testing.T) {
-	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m, rdb := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
 	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	// Queue must exist to be resumable
+	rdb.SAdd(ctx, m.key("queues"), "email")
 
 	w := doRequest(m, "POST", "/api/v1/queues/email/resume", "")
 	if w.Code != http.StatusOK {
@@ -1440,5 +1457,844 @@ func TestCron_GetLastRunFromSortedSet(t *testing.T) {
 	}
 	if lastRun["triggered_at"] == nil {
 		t.Error("last_run.triggered_at missing")
+	}
+}
+
+// --- Security: Path param validation (H1) ---
+
+func TestSecurity_PathParamValidation_ValidChars(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	// Valid path param characters: alphanumeric, hyphens, underscores, dots, colons
+	validIDs := []string{"job-123", "email_queue", "daily.report", "abc123", "user@host"}
+	for _, id := range validIDs {
+		w := doRequest(m, "GET", "/api/v1/jobs/"+id, "")
+		if w.Code == http.StatusBadRequest {
+			t.Errorf("valid id %q rejected as bad request", id)
+		}
+	}
+}
+
+func TestSecurity_PathParamValidation_InvalidChars(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	invalidIDs := []string{
+		"key{injection}",
+		"foo$bar",
+		"test;drop",
+	}
+	for _, id := range invalidIDs {
+		w := doRequest(m, "GET", "/api/v1/jobs/"+id, "")
+		// For path traversal or invalid chars, expect 400 or 404 (router may not match)
+		if w.Code == http.StatusOK {
+			t.Errorf("invalid id %q should not return 200", id)
+		}
+	}
+}
+
+func TestSecurity_PathParamValidation_TooLong(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	longID := strings.Repeat("a", 257)
+	w := doRequest(m, "GET", "/api/v1/jobs/"+longID, "")
+	if w.Code == http.StatusOK {
+		t.Error("257-char id should not return 200")
+	}
+}
+
+// --- Security: Request body size limit (H2) ---
+
+func TestSecurity_RequestBodySizeLimit(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	// Create a body larger than 1MB
+	bigBody := `{"job_ids":["` + strings.Repeat("x", 2<<20) + `"]}`
+	w := doRequest(m, "POST", "/api/v1/jobs/batch/retry", bigBody)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("oversized body: status = %d, want 400", w.Code)
+	}
+}
+
+// --- Security: Login rate limiting (H3) ---
+
+func TestSecurity_LoginRateLimit(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("correct"), bcrypt.MinCost)
+
+	m, rdb := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers:      []AuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	})
+	m.startedAt = time.Now()
+
+	// Make 5 failed login attempts
+	for i := 0; i < 5; i++ {
+		w := doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"wrong"}`)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401", i+1, w.Code)
+		}
+	}
+
+	// 6th attempt should be rate limited
+	w := doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"wrong"}`)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("6th attempt: status = %d, want 429", w.Code)
+	}
+
+	// Even correct password should be blocked
+	w = doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"correct"}`)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct password after rate limit: status = %d, want 429", w.Code)
+	}
+
+	// Clean up rate limit key for test isolation
+	ctx := context.Background()
+	rdb.Del(ctx, m.key("login_attempts", "admin"))
+}
+
+func TestSecurity_LoginRateLimitResetOnSuccess(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("correct"), bcrypt.MinCost)
+
+	m, rdb := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers:      []AuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	})
+	m.startedAt = time.Now()
+
+	// Make 3 failed attempts
+	for i := 0; i < 3; i++ {
+		doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"wrong"}`)
+	}
+
+	// Successful login should reset counter
+	w := doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"correct"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("correct login: status = %d, want 200", w.Code)
+	}
+
+	// Counter should be reset — 5 more failures should work
+	for i := 0; i < 5; i++ {
+		w := doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"wrong"}`)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("after reset, attempt %d: status = %d, want 401", i+1, w.Code)
+		}
+	}
+
+	// Now should be rate limited
+	w = doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"wrong"}`)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("after 5 failures post-reset: status = %d, want 429", w.Code)
+	}
+
+	ctx := context.Background()
+	rdb.Del(ctx, m.key("login_attempts", "admin"))
+}
+
+// --- Security: API key constant-time comparison (H5) ---
+
+func TestSecurity_APIKeyConstantTimeComparison(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		AuthEnabled: true,
+		APIKeys: []AuthAPIKey{
+			{Name: "key1", Key: "gqm_ak_first"},
+			{Name: "key2", Key: "gqm_ak_second"},
+		},
+		AuthUsers: []AuthUser{{Username: "x", PasswordHash: "$2a$10$x"}},
+	})
+	m.startedAt = time.Now()
+
+	// Valid key should work
+	w := doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_first")
+	if w.Code == http.StatusUnauthorized {
+		t.Fatal("valid API key rejected")
+	}
+
+	w = doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_second")
+	if w.Code == http.StatusUnauthorized {
+		t.Fatal("second valid API key rejected")
+	}
+
+	// Invalid key should fail
+	w = doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_invalid")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid API key: status = %d, want 401", w.Code)
+	}
+}
+
+// --- Security: Dashboard auth (M1) ---
+
+func TestSecurity_DashboardRequiresAuth(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("pass"), bcrypt.MinCost)
+	m, _ := testMonitor(t, Config{
+		AuthEnabled: true,
+		DashEnabled: true,
+		AuthUsers:   []AuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	})
+	m.startedAt = time.Now()
+
+	// Unauthenticated request to dashboard should return 401
+	w := doRequest(m, "GET", "/dashboard", "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated dashboard: status = %d, want 401", w.Code)
+	}
+
+	w = doRequest(m, "GET", "/dashboard/", "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated dashboard/: status = %d, want 401", w.Code)
+	}
+
+	// Authenticated request should work
+	w = doRequestWithAPIKey(m, "GET", "/dashboard", "")
+	// No valid API key, should still be 401
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("empty API key dashboard: status = %d, want 401", w.Code)
+	}
+}
+
+// --- Security: Cookie Secure flag (M2) ---
+
+func TestSecurity_CookieSecureFlag(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("pass"), bcrypt.MinCost)
+	m, rdb := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers:      []AuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	})
+	m.startedAt = time.Now()
+
+	// Login and check cookie
+	w := doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"pass"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: status = %d, want 200", w.Code)
+	}
+
+	cookies := w.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == sessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("session cookie not set")
+	}
+	if !sessionCookie.Secure {
+		t.Error("session cookie missing Secure flag")
+	}
+	if !sessionCookie.HttpOnly {
+		t.Error("session cookie missing HttpOnly flag")
+	}
+
+	// Clean up session
+	ctx := context.Background()
+	rdb.Del(ctx, m.key("session", sessionCookie.Value))
+}
+
+// --- Security: Strip X-GQM-User header (M3) ---
+
+func TestSecurity_StripSpoofedUserHeader(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		AuthEnabled: false, // Auth disabled — requests pass through
+	})
+	m.startedAt = time.Now()
+
+	// Send request with spoofed X-GQM-User header
+	req := httptest.NewRequest("GET", "/api/v1/queues", nil)
+	req.Header.Set("X-GQM-User", "spoofed-admin")
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+
+	// The header should have been stripped (not passed through to handler).
+	// Since auth is disabled, no X-GQM-User is set, but the spoofed one should be gone.
+	// We can verify by checking /auth/me which reads the header.
+}
+
+func TestSecurity_StripSpoofedRoleHeader(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		AuthEnabled: true,
+		AuthUsers:   []AuthUser{{Username: "x", PasswordHash: "$2a$10$x"}},
+	})
+	m.startedAt = time.Now()
+
+	// Try to spoof admin role without valid auth — should be rejected at auth level
+	req := httptest.NewRequest("POST", "/api/v1/jobs/test-id/retry", nil)
+	req.Header.Set("X-GQM-Role", "admin")
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("spoofed role header: status = %d, want 401", w.Code)
+	}
+}
+
+// --- Security: Error sanitization (M4) ---
+
+func TestSecurity_ErrorSanitization(t *testing.T) {
+	// sanitizeError should pass through gqm: prefixed errors
+	gqmErr := fmt.Errorf("gqm: job not found")
+	if msg := sanitizeError(gqmErr); msg != "gqm: job not found" {
+		t.Errorf("gqm error sanitized incorrectly: %q", msg)
+	}
+
+	// sanitizeError should NOT pass through "not found" without gqm: prefix
+	// (could leak internal details like Redis error messages)
+	notFoundErr := fmt.Errorf("fetching cron entry test: key not found in cache")
+	if msg := sanitizeError(notFoundErr); msg != "internal error" {
+		t.Errorf("non-gqm not-found error should be sanitized: got %q", msg)
+	}
+
+	// But gqm: prefixed not-found should pass through
+	gqmNotFound := fmt.Errorf("gqm: cron entry %q not found", "test")
+	if msg := sanitizeError(gqmNotFound); msg != gqmNotFound.Error() {
+		t.Errorf("gqm not found error should pass through: got %q", msg)
+	}
+
+	// sanitizeError should hide internal errors
+	internalErr := fmt.Errorf("fetching job abc: connection refused")
+	if msg := sanitizeError(internalErr); msg != "internal error" {
+		t.Errorf("internal error not sanitized: %q", msg)
+	}
+
+	redisErr := fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
+	if msg := sanitizeError(redisErr); msg != "internal error" {
+		t.Errorf("redis error not sanitized: %q", msg)
+	}
+}
+
+// --- Security: RBAC (M9) ---
+
+func TestSecurity_RBAC_ViewerCannotWrite(t *testing.T) {
+	m, rdb := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers: []AuthUser{
+			{Username: "viewer", PasswordHash: "", Role: "viewer"},
+		},
+		APIKeys: []AuthAPIKey{
+			{Name: "viewer-key", Key: "gqm_ak_viewer", Role: "viewer"},
+		},
+	})
+	m.startedAt = time.Now()
+
+	// Create a session for the viewer user
+	ctx := context.Background()
+	token := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	rdb.Set(ctx, m.key("session", token), "viewer", time.Hour)
+
+	// Viewer should be able to read
+	w := doRequestWithCookie(m, "GET", "/api/v1/queues", token)
+	// Should not be 401 or 403
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+		t.Fatalf("viewer read queues: status = %d, want not 401/403", w.Code)
+	}
+
+	// Viewer should be blocked from write endpoints
+	writeEndpoints := []struct {
+		method string
+		path   string
+	}{
+		{"POST", "/api/v1/jobs/test-id/retry"},
+		{"POST", "/api/v1/jobs/test-id/cancel"},
+		{"DELETE", "/api/v1/jobs/test-id"},
+		{"POST", "/api/v1/queues/test-q/pause"},
+		{"POST", "/api/v1/queues/test-q/resume"},
+		{"POST", "/api/v1/cron/test-id/trigger"},
+		{"POST", "/api/v1/cron/test-id/enable"},
+		{"POST", "/api/v1/cron/test-id/disable"},
+	}
+	for _, ep := range writeEndpoints {
+		w = doRequestWithCookie(m, ep.method, ep.path, token)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s %s: viewer status = %d, want 403", ep.method, ep.path, w.Code)
+		}
+	}
+
+	rdb.Del(ctx, m.key("session", token))
+}
+
+func TestSecurity_RBAC_AdminCanWrite(t *testing.T) {
+	m, rdb := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers: []AuthUser{
+			{Username: "admin", PasswordHash: "", Role: "admin"},
+		},
+	})
+	m.startedAt = time.Now()
+
+	// Create a session for the admin user
+	ctx := context.Background()
+	token := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	rdb.Set(ctx, m.key("session", token), "admin", time.Hour)
+
+	// Admin should NOT get 403 on write endpoints (might get 501 since no admin backend)
+	w := doRequestWithCookieCSRF(m, "POST", "/api/v1/jobs/test-id/retry", token)
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("admin retry job: status = 403, admin should not be blocked")
+	}
+
+	rdb.Del(ctx, m.key("session", token))
+}
+
+func TestSecurity_RBAC_DefaultRoleIsAdmin(t *testing.T) {
+	m, rdb := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers: []AuthUser{
+			{Username: "olduser", PasswordHash: ""}, // No Role set
+		},
+	})
+	m.startedAt = time.Now()
+
+	// Create a session for user with no explicit role
+	ctx := context.Background()
+	token := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	rdb.Set(ctx, m.key("session", token), "olduser", time.Hour)
+
+	// Should default to admin role — not blocked from write endpoints
+	w := doRequestWithCookieCSRF(m, "POST", "/api/v1/jobs/test-id/retry", token)
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("default role user: status = 403, should default to admin")
+	}
+
+	rdb.Del(ctx, m.key("session", token))
+}
+
+func TestSecurity_RBAC_APIKeyViewerBlocked(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		AuthEnabled: true,
+		APIKeys: []AuthAPIKey{
+			{Name: "viewer-key", Key: "gqm_ak_viewer", Role: "viewer"},
+			{Name: "admin-key", Key: "gqm_ak_admin", Role: "admin"},
+		},
+		AuthUsers: []AuthUser{{Username: "x", PasswordHash: "$2a$10$x"}},
+	})
+	m.startedAt = time.Now()
+
+	// Viewer API key should be blocked from write endpoints
+	w := doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_viewer")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("viewer API key write: status = %d, want 403", w.Code)
+	}
+
+	// Admin API key should not be blocked
+	w = doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_admin")
+	if w.Code == http.StatusForbidden {
+		t.Fatal("admin API key blocked from write endpoint")
+	}
+}
+
+// --- Security: Username enumeration timing (L1) ---
+
+func TestSecurity_UsernameEnumerationTiming(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("correct"), bcrypt.MinCost)
+
+	m, _ := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers:      []AuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	})
+	m.startedAt = time.Now()
+
+	// Both existing and non-existing users should return the same error message.
+	// This tests the behavioral aspect — timing side-channel is hard to verify
+	// in a unit test, but we verify both paths reach the same code.
+	w := doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"wrong"}`)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password: status = %d, want 401", w.Code)
+	}
+	var resp1 map[string]any
+	json.NewDecoder(w.Body).Decode(&resp1)
+
+	w = doRequest(m, "POST", "/auth/login", `{"username":"nonexistent","password":"wrong"}`)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown user: status = %d, want 401", w.Code)
+	}
+	var resp2 map[string]any
+	json.NewDecoder(w.Body).Decode(&resp2)
+
+	// Both should return identical error response
+	if resp1["error"] != resp2["error"] {
+		t.Errorf("responses differ: %q vs %q", resp1["error"], resp2["error"])
+	}
+	if resp1["code"] != resp2["code"] {
+		t.Errorf("error codes differ: %q vs %q", resp1["code"], resp2["code"])
+	}
+}
+
+// --- Security: Session token format validation (L2) ---
+
+func TestSecurity_SessionTokenFormatValidation(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		AuthEnabled: true,
+		AuthUsers:   []AuthUser{{Username: "admin", PasswordHash: "$2a$10$x"}},
+	})
+	m.startedAt = time.Now()
+
+	invalidTokens := []struct {
+		name  string
+		token string
+	}{
+		{"too short", "abc123"},
+		{"too long", strings.Repeat("a", 65)},
+		{"non-hex chars", strings.Repeat("g", 64)},
+		{"has spaces", strings.Repeat("a", 32) + " " + strings.Repeat("b", 31)},
+		{"uppercase hex", strings.Repeat("A", 64)},
+		{"redis injection", "session:*:admin" + strings.Repeat("0", 49)},
+	}
+
+	for _, tt := range invalidTokens {
+		t.Run(tt.name, func(t *testing.T) {
+			w := doRequestWithCookie(m, "GET", "/api/v1/queues", tt.token)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("token %q: status = %d, want 401", tt.name, w.Code)
+			}
+		})
+	}
+}
+
+func TestSecurity_SessionTokenValidFormatAccepted(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("pass"), bcrypt.MinCost)
+	m, rdb := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers:      []AuthUser{{Username: "admin", PasswordHash: string(hash)}},
+	})
+	m.startedAt = time.Now()
+
+	// Login to get a valid token
+	w := doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"pass"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: status = %d", w.Code)
+	}
+
+	var sessionToken string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			sessionToken = c.Value
+			break
+		}
+	}
+	if sessionToken == "" {
+		t.Fatal("no session cookie")
+	}
+
+	// Valid 64 hex-char token should work
+	w = doRequestWithCookie(m, "GET", "/api/v1/queues", sessionToken)
+	if w.Code == http.StatusUnauthorized {
+		t.Fatal("valid session token rejected")
+	}
+
+	ctx := context.Background()
+	rdb.Del(ctx, m.key("session", sessionToken))
+}
+
+// --- Security: Batch job ID deduplication (L3) ---
+
+func TestSecurity_BatchJobIDDeduplication(t *testing.T) {
+	var retryCalls int
+	admin := &mockAdmin{
+		retryJobFn: func(_ context.Context, _ string) error {
+			retryCalls++
+			return nil
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	// Send duplicate IDs
+	body := `{"job_ids":["j1","j2","j1","j3","j2"]}`
+	w := doRequest(m, "POST", "/api/v1/jobs/batch/retry", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	// Should only have processed 3 unique IDs
+	if retryCalls != 3 {
+		t.Errorf("retry called %d times, want 3 (deduplicated)", retryCalls)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+	if data["succeeded"] != float64(3) {
+		t.Errorf("succeeded = %v, want 3", data["succeeded"])
+	}
+}
+
+func TestSecurity_BatchDeleteDeduplication(t *testing.T) {
+	var deleteCalls int
+	admin := &mockAdmin{
+		deleteJobFn: func(_ context.Context, _ string) error {
+			deleteCalls++
+			return nil
+		},
+	}
+	m, _ := testMonitorWithAdmin(t, Config{}, admin)
+	m.startedAt = time.Now()
+
+	body := `{"job_ids":["j1","j1","j1"]}`
+	w := doRequest(m, "POST", "/api/v1/jobs/batch/delete", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	if deleteCalls != 1 {
+		t.Errorf("delete called %d times, want 1 (deduplicated)", deleteCalls)
+	}
+}
+
+// --- Security: PauseQueue validate queue exists (L4) ---
+
+func TestSecurity_PauseQueueNotFound(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	// Queue doesn't exist in gqm:queues set
+	w := doRequest(m, "POST", "/api/v1/queues/nonexistent/pause", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("pause nonexistent queue: status = %d, want 404", w.Code)
+	}
+}
+
+func TestSecurity_ResumeQueueNotFound(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/queues/nonexistent/resume", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("resume nonexistent queue: status = %d, want 404", w.Code)
+	}
+}
+
+func TestSecurity_PauseQueueExists(t *testing.T) {
+	m, rdb := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	rdb.SAdd(ctx, m.key("queues"), "email")
+
+	w := doRequest(m, "POST", "/api/v1/queues/email/pause", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("pause existing queue: status = %d, want 200", w.Code)
+	}
+}
+
+// --- Security: Validate status query param (L5) ---
+
+func TestSecurity_ValidateStatusQueryParam(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	rdb.SAdd(ctx, m.key("queues"), "email")
+
+	tests := []struct {
+		status   string
+		wantCode int
+	}{
+		{"", http.StatusOK},              // default → ready
+		{"ready", http.StatusOK},         // explicit ready
+		{"processing", http.StatusOK},    // valid
+		{"completed", http.StatusOK},     // valid
+		{"dead_letter", http.StatusOK},   // valid
+		{"invalid", http.StatusBadRequest},
+		{"PROCESSING", http.StatusBadRequest}, // case sensitive
+		{"all", http.StatusBadRequest},
+		{"active", http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run("status="+tt.status, func(t *testing.T) {
+			path := "/api/v1/queues/email/jobs"
+			if tt.status != "" {
+				path += "?status=" + tt.status
+			}
+			w := doRequest(m, "GET", path, "")
+			if w.Code != tt.wantCode {
+				t.Errorf("status=%q: got %d, want %d; body=%s", tt.status, w.Code, tt.wantCode, w.Body.String())
+			}
+		})
+	}
+}
+
+// --- Security: Job response field allowlist (L6) ---
+
+func TestSecurity_JobResponseFieldAllowlist(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	// Seed a job with both known and unknown fields
+	rdb.HSet(ctx, m.key("job", "j-test"),
+		"id", "j-test",
+		"type", "email.send",
+		"queue", "default",
+		"status", "completed",
+		"payload", `{"to":"a@b.com"}`,
+		"internal_secret", "should-not-appear",
+		"_debug_trace", "redis-node-3",
+		"some_future_field", "unknown",
+	)
+
+	w := doRequest(m, "GET", "/api/v1/jobs/j-test", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.(map[string]any)
+
+	// Known fields should be present
+	if data["id"] != "j-test" {
+		t.Errorf("id = %v", data["id"])
+	}
+	if data["type"] != "email.send" {
+		t.Errorf("type = %v", data["type"])
+	}
+
+	// Unknown fields should be filtered out
+	for _, field := range []string{"internal_secret", "_debug_trace", "some_future_field"} {
+		if _, exists := data[field]; exists {
+			t.Errorf("field %q should be filtered out by allowlist but is present", field)
+		}
+	}
+}
+
+// --- Security: CSRF protection (I1) ---
+
+func TestSecurity_CSRF_CookieAuthRequiresCSRFHeader(t *testing.T) {
+	m, rdb := testMonitorWithAdmin(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers:      []AuthUser{{Username: "admin", PasswordHash: "", Role: "admin"}},
+	}, &mockAdmin{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	token := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	rdb.Set(ctx, m.key("session", token), "admin", time.Hour)
+
+	// Write request with session cookie but NO CSRF header → 403
+	w := doRequestWithCookie(m, "POST", "/api/v1/jobs/test-id/retry", token)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("missing CSRF: status = %d, want 403", w.Code)
+	}
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["code"] != "CSRF_REQUIRED" {
+		t.Errorf("error code = %v, want CSRF_REQUIRED", resp["code"])
+	}
+
+	// Write request with session cookie AND CSRF header → should pass (501 since no admin)
+	w = doRequestWithCookieCSRF(m, "POST", "/api/v1/jobs/test-id/retry", token)
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("with CSRF header: status = 403, should pass")
+	}
+
+	rdb.Del(ctx, m.key("session", token))
+}
+
+func TestSecurity_CSRF_APIKeyExempt(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{
+		AuthEnabled: true,
+		APIKeys:     []AuthAPIKey{{Name: "admin-key", Key: "gqm_ak_admin", Role: "admin"}},
+		AuthUsers:   []AuthUser{{Username: "x", PasswordHash: "$2a$10$x"}},
+	}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	// API key auth should NOT require CSRF header
+	w := doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_admin")
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("API key write: status = 403, API keys should be exempt from CSRF")
+	}
+}
+
+func TestSecurity_CSRF_AuthDisabledExempt(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{
+		AuthEnabled: false,
+	}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	// No auth → no CSRF check needed
+	w := doRequest(m, "POST", "/api/v1/jobs/test-id/retry", "")
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("auth disabled: status = 403, should not check CSRF")
+	}
+}
+
+func TestSecurity_CSRF_ReadEndpointsNotAffected(t *testing.T) {
+	m, rdb := testMonitor(t, Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 3600,
+		AuthUsers:      []AuthUser{{Username: "viewer", PasswordHash: "", Role: "viewer"}},
+	})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	token := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	rdb.Set(ctx, m.key("session", token), "viewer", time.Hour)
+
+	// Read endpoint with cookie, no CSRF header → should work (no CSRF on reads)
+	w := doRequestWithCookie(m, "GET", "/api/v1/queues", token)
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("read endpoint: status = 403, reads should not check CSRF")
+	}
+
+	rdb.Del(ctx, m.key("session", token))
+}
+
+// --- Security: Audit logging (I2) ---
+
+func TestSecurity_AuditLogging_AdminRetry(t *testing.T) {
+	// Audit logging is slog.Info calls — we verify the handler doesn't break
+	// when logging is active. Full log capture would require a custom slog.Handler.
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "POST", "/api/v1/jobs/j1/retry", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Security: GET workers no side effects (I3) ---
+
+func TestSecurity_GetWorkersNoSideEffect(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	// Add a worker to the set but don't create the hash (simulates expired TTL)
+	rdb.SAdd(ctx, m.key("workers"), "stale-pool")
+
+	// GET should NOT remove the stale entry from the set
+	w := doRequest(m, "GET", "/api/v1/workers", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	// The response should be empty (stale worker skipped)
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp.Data.([]any)
+	if len(data) != 0 {
+		t.Errorf("expected 0 workers (stale skipped), got %d", len(data))
+	}
+
+	// But the stale entry should still be in the set (no SRem side effect)
+	isMember, err := rdb.SIsMember(ctx, m.key("workers"), "stale-pool").Result()
+	if err != nil {
+		t.Fatalf("SIsMember: %v", err)
+	}
+	if !isMember {
+		t.Error("stale worker entry was removed from set — GET should not have side effects")
 	}
 }

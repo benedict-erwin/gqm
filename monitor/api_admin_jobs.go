@@ -16,12 +16,16 @@ func (m *Monitor) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
+	if !validatePathParam(w, "id", id) {
+		return
+	}
 	if err := m.admin.RetryJob(r.Context(), id); err != nil {
 		code := errorToHTTPStatus(err)
-		writeError(w, code, err.Error(), errorToCode(err))
+		writeError(w, code, sanitizeError(err), errorToCode(err))
 		return
 	}
 
+	m.logger.Info("admin: retry job", "job_id", id, "user", r.Header.Get("X-GQM-User"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"job_id": id,
@@ -37,12 +41,16 @@ func (m *Monitor) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
+	if !validatePathParam(w, "id", id) {
+		return
+	}
 	if err := m.admin.CancelJob(r.Context(), id); err != nil {
 		code := errorToHTTPStatus(err)
-		writeError(w, code, err.Error(), errorToCode(err))
+		writeError(w, code, sanitizeError(err), errorToCode(err))
 		return
 	}
 
+	m.logger.Info("admin: cancel job", "job_id", id, "user", r.Header.Get("X-GQM-User"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"job_id": id,
@@ -58,12 +66,16 @@ func (m *Monitor) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
+	if !validatePathParam(w, "id", id) {
+		return
+	}
 	if err := m.admin.DeleteJob(r.Context(), id); err != nil {
 		code := errorToHTTPStatus(err)
-		writeError(w, code, err.Error(), errorToCode(err))
+		writeError(w, code, sanitizeError(err), errorToCode(err))
 		return
 	}
 
+	m.logger.Info("admin: delete job", "job_id", id, "user", r.Header.Get("X-GQM-User"))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -87,6 +99,7 @@ func (m *Monitor) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req batchRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 		return
@@ -101,13 +114,22 @@ func (m *Monitor) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate and deduplicate job IDs before processing.
+	ids := deduplicateIDs(req.JobIDs)
+	for _, id := range ids {
+		if !validPathParam.MatchString(id) {
+			writeError(w, http.StatusBadRequest, "job_ids contains invalid characters", "BAD_REQUEST")
+			return
+		}
+	}
+
 	ctx := r.Context()
-	results := make([]batchResult, 0, len(req.JobIDs))
+	results := make([]batchResult, 0, len(ids))
 	var succeeded, failed int
 
-	for _, id := range req.JobIDs {
+	for _, id := range ids {
 		if err := m.admin.RetryJob(ctx, id); err != nil {
-			results = append(results, batchResult{JobID: id, OK: false, Error: err.Error()})
+			results = append(results, batchResult{JobID: id, OK: false, Error: sanitizeError(err)})
 			failed++
 		} else {
 			results = append(results, batchResult{JobID: id, OK: true})
@@ -115,6 +137,7 @@ func (m *Monitor) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	m.logger.Info("admin: batch retry", "succeeded", succeeded, "failed", failed, "total", len(ids), "user", r.Header.Get("X-GQM-User"))
 	writeJSON(w, http.StatusOK, response{Data: map[string]any{
 		"succeeded": succeeded,
 		"failed":    failed,
@@ -130,6 +153,7 @@ func (m *Monitor) handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req batchRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 		return
@@ -144,13 +168,22 @@ func (m *Monitor) handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate and deduplicate job IDs before processing.
+	ids := deduplicateIDs(req.JobIDs)
+	for _, id := range ids {
+		if !validPathParam.MatchString(id) {
+			writeError(w, http.StatusBadRequest, "job_ids contains invalid characters", "BAD_REQUEST")
+			return
+		}
+	}
+
 	ctx := r.Context()
-	results := make([]batchResult, 0, len(req.JobIDs))
+	results := make([]batchResult, 0, len(ids))
 	var succeeded, failed int
 
-	for _, id := range req.JobIDs {
+	for _, id := range ids {
 		if err := m.admin.DeleteJob(ctx, id); err != nil {
-			results = append(results, batchResult{JobID: id, OK: false, Error: err.Error()})
+			results = append(results, batchResult{JobID: id, OK: false, Error: sanitizeError(err)})
 			failed++
 		} else {
 			results = append(results, batchResult{JobID: id, OK: true})
@@ -158,6 +191,7 @@ func (m *Monitor) handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	m.logger.Info("admin: batch delete", "succeeded", succeeded, "failed", failed, "total", len(ids), "user", r.Header.Get("X-GQM-User"))
 	writeJSON(w, http.StatusOK, response{Data: map[string]any{
 		"succeeded": succeeded,
 		"failed":    failed,
@@ -189,4 +223,30 @@ func errorToCode(err error) string {
 	default:
 		return "INTERNAL"
 	}
+}
+
+// sanitizeError returns a safe error message for the client. Errors prefixed
+// with "gqm:" are user-facing business logic errors and are passed through.
+// All other errors (Redis failures, marshaling, etc.) are replaced with a
+// generic message to avoid leaking internal details.
+func sanitizeError(err error) string {
+	msg := err.Error()
+	if strings.HasPrefix(msg, "gqm:") {
+		return msg
+	}
+	return "internal error"
+}
+
+// deduplicateIDs returns a new slice with duplicate IDs removed, preserving order.
+func deduplicateIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
