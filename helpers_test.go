@@ -14,6 +14,8 @@ func TestValidateJobInputs_Valid(t *testing.T) {
 		{"default values", "default", "abc-123"},
 		{"dots and underscores", "email.queue", "job_123.v2"},
 		{"alphanumeric", "payments", "PAY001"},
+		{"colon namespace", "email:send", "job-001"},
+		{"nested namespace", "app:email:send", "job-002"},
 		{"max queue length", strings.Repeat("a", 128), "ok"},
 		{"max job ID length", "ok", strings.Repeat("b", 256)},
 	}
@@ -33,7 +35,6 @@ func TestValidateJobInputs_InvalidQueue(t *testing.T) {
 		name  string
 		queue string
 	}{
-		{"colon injection", "queue:malicious:ready"},
 		{"slash", "queue/path"},
 		{"space", "queue name"},
 		{"empty after validation skip", ""},
@@ -64,7 +65,6 @@ func TestValidateJobInputs_InvalidJobID(t *testing.T) {
 		name  string
 		jobID string
 	}{
-		{"colon injection", "job:id:bad"},
 		{"slash", "../../etc/passwd"},
 		{"exceeds 256 chars", strings.Repeat("y", 257)},
 		{"empty string", ""},

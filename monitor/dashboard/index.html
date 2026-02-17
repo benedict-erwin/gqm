@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GQM Dashboard</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="layout">
+        <nav id="sidebar">
+            <div class="sidebar-header">
+                <h1 class="logo">GQM</h1>
+                <span class="version">Dashboard</span>
+            </div>
+            <ul class="nav-links">
+                <li><a href="#/" data-page="overview" class="nav-link active">Overview</a></li>
+                <li><a href="#/servers" data-page="servers" class="nav-link">Servers</a></li>
+                <li><a href="#/queues" data-page="queues" class="nav-link">Queues</a></li>
+                <li><a href="#/workers" data-page="workers" class="nav-link">Workers</a></li>
+                <li><a href="#/failed" data-page="failed" class="nav-link">Failed / DLQ</a></li>
+                <li><a href="#/scheduler" data-page="scheduler" class="nav-link">Scheduler</a></li>
+                <li><a href="#/dag" data-page="dag" class="nav-link">DAG</a></li>
+            </ul>
+            <div class="sidebar-footer">
+                <span id="auth-user"></span>
+                <button id="logout-btn" class="btn btn--sm btn--ghost" style="display:none">Logout</button>
+            </div>
+        </nav>
+        <main id="content">
+            <div id="app"></div>
+        </main>
+    </div>
+
+    <div id="toast-container"></div>
+
+    <script src="vendor/chart.min.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/components/login.js"></script>
+    <script src="js/components/overview.js"></script>
+    <script src="js/components/servers.js"></script>
+    <script src="js/components/queues.js"></script>
+    <script src="js/components/jobs.js"></script>
+    <script src="js/components/workers.js"></script>
+    <script src="js/components/failed.js"></script>
+    <script src="js/components/scheduler.js"></script>
+    <script src="js/components/dag.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

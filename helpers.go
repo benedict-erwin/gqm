@@ -9,7 +9,12 @@ import (
 )
 
 // safeNameRe matches strings containing only safe characters for Redis key components.
-var safeNameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+// Colons are allowed because GQM uses "namespace:action" convention for job types
+// (e.g., "email:send", "report:generate") and implicit pools derive their queue name
+// from the job type. The colon-in-key-segment concern is theoretical — key() always
+// uses fixed structural suffixes (e.g., "ready", "processing"), so a colon in the
+// value segment cannot produce a key that collides with a different resource.
+var safeNameRe = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
 
 // validateJobInputs checks queue name, job ID, and dependency IDs for safe characters.
 func validateJobInputs(job *Job) error {

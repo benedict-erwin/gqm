@@ -88,7 +88,7 @@ func New(rdb *redis.Client, prefix string, logger *slog.Logger, cfg Config, admi
 
 	m.server = &http.Server{
 		Addr:         addr,
-		Handler:      m.mux,
+		Handler:      m.requestLogger(m.mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -116,6 +116,33 @@ func (m *Monitor) Start() error {
 func (m *Monitor) Stop(ctx context.Context) error {
 	m.logger.Info("monitor HTTP server stopping")
 	return m.server.Shutdown(ctx)
+}
+
+// requestLogger wraps an http.Handler and logs each incoming request and its response status.
+func (m *Monitor) requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rw, r)
+		m.logger.Debug("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.status,
+			"duration", time.Since(start).String(),
+			"remote", r.RemoteAddr,
+		)
+	})
+}
+
+// statusWriter wraps http.ResponseWriter to capture the response status code.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }
 
 // key builds a prefixed Redis key.

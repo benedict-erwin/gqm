@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -163,6 +165,16 @@ func WithAuthEnabled(enabled bool) ServerOption {
 	return func(cfg *serverConfig) { cfg.authEnabled = enabled }
 }
 
+// WithAuthUsers sets the users for the monitoring API.
+func WithAuthUsers(users []AuthUser) ServerOption {
+	return func(cfg *serverConfig) { cfg.authUsers = users }
+}
+
+// WithAPIKeys sets the API keys for programmatic access.
+func WithAPIKeys(keys []AuthAPIKey) ServerOption {
+	return func(cfg *serverConfig) { cfg.apiKeys = keys }
+}
+
 // Server manages worker pools and processes jobs.
 type Server struct {
 	cfg      *serverConfig
@@ -192,6 +204,10 @@ type Server struct {
 	// mon holds the HTTP monitoring server (nil if API disabled).
 	mon *monitor.Monitor
 
+	// serverID uniquely identifies this server instance (hostname:pid).
+	serverID  string
+	startedAt time.Time
+
 	mu      sync.RWMutex
 	running bool
 	stopCh  chan struct{}
@@ -206,6 +222,7 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		shutdownTimeout:       defaultShutdownTimeout,
 		schedulerEnabled:      true,
 		schedulerPollInterval: defaultSchedulerPollInterval,
+		authSessionTTL:        86400, // 24 hours
 	}
 	for _, opt := range opts {
 		opt(cfg)
@@ -226,6 +243,9 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		return nil, fmt.Errorf("loading lua scripts: %w", err)
 	}
 
+	hostname, _ := os.Hostname()
+	serverID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
+
 	s := &Server{
 		cfg:         cfg,
 		rc:          rc,
@@ -235,6 +255,7 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		poolNames:   make(map[string]bool),
 		cronEntries: make(map[string]*CronEntry),
 		logger:      cfg.logger,
+		serverID:    serverID,
 		stopCh:      make(chan struct{}),
 	}
 
@@ -402,7 +423,10 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("saving cron entries: %w", err)
 	}
 
+	s.startedAt = time.Now()
+
 	s.logger.Info("server starting",
+		"server_id", s.serverID,
 		"pools", len(s.pools),
 		"handlers", len(s.handlers),
 		"cron_entries", len(s.cronEntries),
@@ -429,6 +453,13 @@ func (s *Server) Start(ctx context.Context) error {
 			sched.run(ctx)
 		}()
 	}
+
+	// Server-level heartbeat
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.serverHeartbeatLoop(ctx)
+	}()
 
 	for _, p := range s.pools {
 		wg.Add(1)
@@ -497,6 +528,9 @@ func (s *Server) Start(ctx context.Context) error {
 		shutdownCancel()
 	}
 
+	// Remove server registration from Redis
+	s.cleanupServerHeartbeat()
+
 	s.mu.Lock()
 	s.running = false
 	s.mu.Unlock()
@@ -509,6 +543,89 @@ func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
+}
+
+// defaultServerHeartbeatInterval is the interval between server-level heartbeat updates.
+const defaultServerHeartbeatInterval = 10 * time.Second
+
+// serverHeartbeatLoop periodically updates the server registration in Redis.
+func (s *Server) serverHeartbeatLoop(ctx context.Context) {
+	s.sendServerHeartbeat(ctx)
+
+	ticker := time.NewTicker(defaultServerHeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sendServerHeartbeat(ctx)
+		}
+	}
+}
+
+// sendServerHeartbeat writes server info to Redis.
+func (s *Server) sendServerHeartbeat(ctx context.Context) {
+	serverKey := s.rc.Key("server", s.serverID)
+
+	poolNames := make([]string, 0, len(s.pools))
+	for _, p := range s.pools {
+		poolNames = append(poolNames, p.cfg.name)
+	}
+
+	pipe := s.rc.rdb.Pipeline()
+	pipe.HSet(ctx, serverKey,
+		"id", s.serverID,
+		"hostname", s.hostname(),
+		"pid", os.Getpid(),
+		"go_version", runtime.Version(),
+		"started_at", s.startedAt.Unix(),
+		"last_heartbeat", time.Now().Unix(),
+		"pools", strings.Join(poolNames, ","),
+		"num_pools", len(s.pools),
+		"concurrency_total", s.totalConcurrency(),
+		"status", "active",
+	)
+	pipe.SAdd(ctx, s.rc.Key("servers"), s.serverID)
+	pipe.Expire(ctx, serverKey, 3*defaultServerHeartbeatInterval)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		if ctx.Err() == nil {
+			s.logger.Error("server heartbeat update failed", "error", err)
+		}
+	}
+}
+
+// cleanupServerHeartbeat removes the server registration on graceful shutdown.
+func (s *Server) cleanupServerHeartbeat() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pipe := s.rc.rdb.Pipeline()
+	pipe.Del(ctx, s.rc.Key("server", s.serverID))
+	pipe.SRem(ctx, s.rc.Key("servers"), s.serverID)
+	if _, err := pipe.Exec(ctx); err != nil {
+		s.logger.Error("server heartbeat cleanup failed", "error", err)
+	}
+}
+
+// hostname returns the hostname or "unknown" on error.
+func (s *Server) hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return h
+}
+
+// totalConcurrency returns the sum of concurrency across all pools.
+func (s *Server) totalConcurrency() int {
+	total := 0
+	for _, p := range s.pools {
+		total += p.cfg.concurrency
+	}
+	return total
 }
 
 // ensureDefaultPool creates a "default" pool for handlers not assigned to any pool.

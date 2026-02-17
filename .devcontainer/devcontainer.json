@@ -1,0 +1,48 @@
+{
+  "name": "GQM Dev",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "dev",
+  "workspaceFolder": "/workspace",
+
+  "features": {
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.26"
+    }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "redhat.vscode-yaml",
+        "sumneko.lua"
+      ],
+      "settings": {
+        "go.toolsManagement.autoUpdate": true,
+        "go.lintTool": "golangci-lint",
+        "go.testFlags": ["-v", "-count=1"],
+        "go.testEnvVars": {
+          "GQM_TEST_REDIS_ADDR": "redis:6379"
+        },
+        "editor.formatOnSave": true,
+        "[go]": {
+          "editor.defaultFormatter": "golang.go"
+        }
+      }
+    }
+  },
+
+  "containerEnv": {
+    "GQM_TEST_REDIS_ADDR": "redis:6379"
+  },
+
+  "forwardPorts": [6379, 8080],
+  "portsAttributes": {
+    "6379": { "label": "Redis" },
+    "8080": { "label": "GQM Monitor" }
+  },
+
+  "postCreateCommand": "go mod download && go build ./...",
+
+  "remoteUser": "vscode"
+}

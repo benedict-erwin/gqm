@@ -2,11 +2,14 @@ package monitor
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +32,9 @@ func testRedisClient(t *testing.T) *redis.Client {
 }
 
 func testRedisAddr() string {
+	if addr := os.Getenv("GQM_TEST_REDIS_ADDR"); addr != "" {
+		return addr
+	}
 	return "localhost:6379"
 }
 
@@ -677,22 +683,21 @@ func TestCron_GetExisting(t *testing.T) {
 
 // --- Dashboard ---
 
-func TestDashboard_Placeholder(t *testing.T) {
+func TestDashboard_RedirectToTrailingSlash(t *testing.T) {
 	m, _ := testMonitor(t, Config{
 		DashEnabled:    true,
 		DashPathPrefix: "/dashboard",
 	})
 	m.startedAt = time.Now()
 
+	// /dashboard should redirect to /dashboard/
 	w := doRequest(m, "GET", "/dashboard", "")
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d", w.Code)
+	if w.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
-		t.Errorf("content-type = %q", ct)
-	}
-	if !strings.Contains(w.Body.String(), "GQM Dashboard") {
-		t.Error("dashboard HTML missing expected content")
+	loc := w.Header().Get("Location")
+	if loc != "/dashboard/" {
+		t.Fatalf("Location = %q, want /dashboard/", loc)
 	}
 }
 
@@ -1466,8 +1471,8 @@ func TestSecurity_PathParamValidation_ValidChars(t *testing.T) {
 	m, _ := testMonitor(t, Config{})
 	m.startedAt = time.Now()
 
-	// Valid path param characters: alphanumeric, hyphens, underscores, dots, colons
-	validIDs := []string{"job-123", "email_queue", "daily.report", "abc123", "user@host"}
+	// Valid path param characters: alphanumeric, hyphens, underscores, dots, colons, @
+	validIDs := []string{"job-123", "email_queue", "daily.report", "abc123", "user@host", "email:send", "app:email:send"}
 	for _, id := range validIDs {
 		w := doRequest(m, "GET", "/api/v1/jobs/"+id, "")
 		if w.Code == http.StatusBadRequest {
@@ -1628,31 +1633,123 @@ func TestSecurity_APIKeyConstantTimeComparison(t *testing.T) {
 
 // --- Security: Dashboard auth (M1) ---
 
-func TestSecurity_DashboardRequiresAuth(t *testing.T) {
-	hash, _ := bcrypt.GenerateFromPassword([]byte("pass"), bcrypt.MinCost)
+func TestDashboard_ServesEmbedded(t *testing.T) {
 	m, _ := testMonitor(t, Config{
-		AuthEnabled: true,
 		DashEnabled: true,
-		AuthUsers:   []AuthUser{{Username: "admin", PasswordHash: string(hash)}},
 	})
 	m.startedAt = time.Now()
 
-	// Unauthenticated request to dashboard should return 401
+	// /dashboard should redirect to /dashboard/
 	w := doRequest(m, "GET", "/dashboard", "")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated dashboard: status = %d, want 401", w.Code)
+	if w.Code != http.StatusMovedPermanently {
+		t.Fatalf("GET /dashboard: status = %d, want 301", w.Code)
 	}
 
+	// /dashboard/ should serve index.html (no auth required for static assets)
 	w = doRequest(m, "GET", "/dashboard/", "")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated dashboard/: status = %d, want 401", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard/: status = %d, want 200", w.Code)
 	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Fatalf("GET /dashboard/: Content-Type = %q, want text/html", ct)
+	}
+}
 
-	// Authenticated request should work
-	w = doRequestWithAPIKey(m, "GET", "/dashboard", "")
-	// No valid API key, should still be 401
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("empty API key dashboard: status = %d, want 401", w.Code)
+func TestDashboard_ServesCSS(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		DashEnabled: true,
+	})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "GET", "/dashboard/css/style.css", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard/css/style.css: status = %d, want 200", w.Code)
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/css") {
+		t.Fatalf("GET /dashboard/css/style.css: Content-Type = %q, want text/css", ct)
+	}
+}
+
+func TestDashboard_ServesJS(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		DashEnabled: true,
+	})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "GET", "/dashboard/js/app.js", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard/js/app.js: status = %d, want 200", w.Code)
+	}
+}
+
+func TestDashboard_SPAFallback(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		DashEnabled: true,
+	})
+	m.startedAt = time.Now()
+
+	// Non-file path should serve index.html (SPA routing)
+	w := doRequest(m, "GET", "/dashboard/queues", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard/queues (SPA fallback): status = %d, want 200", w.Code)
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Fatalf("SPA fallback Content-Type = %q, want text/html", ct)
+	}
+}
+
+func TestDashboard_Disabled(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		DashEnabled: false,
+	})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "GET", "/dashboard/", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("disabled dashboard: status = %d, want 404", w.Code)
+	}
+}
+
+func TestDashboard_CustomDir(t *testing.T) {
+	// Create a temp directory with a custom index.html
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("<html>custom</html>"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "VERSION"), []byte("0.1.0\n"), 0644)
+
+	m, _ := testMonitor(t, Config{
+		DashEnabled:   true,
+		DashCustomDir: tmpDir,
+	})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "GET", "/dashboard/", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("custom dir dashboard: status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "custom") {
+		t.Fatalf("expected custom content, got: %s", body)
+	}
+}
+
+func TestDashboard_VersionMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("<html>old</html>"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "VERSION"), []byte("0.0.1\n"), 0644)
+
+	// Should not panic — just logs a warning
+	m, _ := testMonitor(t, Config{
+		DashEnabled:   true,
+		DashCustomDir: tmpDir,
+	})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "GET", "/dashboard/", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("version mismatch dashboard: status = %d, want 200", w.Code)
 	}
 }
 
@@ -1667,7 +1764,7 @@ func TestSecurity_CookieSecureFlag(t *testing.T) {
 	})
 	m.startedAt = time.Now()
 
-	// Login and check cookie
+	// Login over plain HTTP — Secure should be false
 	w := doRequest(m, "POST", "/auth/login", `{"username":"admin","password":"pass"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login: status = %d, want 200", w.Code)
@@ -1684,16 +1781,40 @@ func TestSecurity_CookieSecureFlag(t *testing.T) {
 	if sessionCookie == nil {
 		t.Fatal("session cookie not set")
 	}
-	if !sessionCookie.Secure {
-		t.Error("session cookie missing Secure flag")
+	if sessionCookie.Secure {
+		t.Error("session cookie should NOT have Secure flag on plain HTTP")
 	}
 	if !sessionCookie.HttpOnly {
 		t.Error("session cookie missing HttpOnly flag")
 	}
 
-	// Clean up session
+	// Login over HTTPS (TLS) — Secure should be true
+	req := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"username":"admin","password":"pass"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.TLS = &tls.ConnectionState{} // simulate HTTPS
+	w2 := httptest.NewRecorder()
+	m.mux.ServeHTTP(w2, req)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("TLS login: status = %d, want 200", w2.Code)
+	}
+	var tlsCookie *http.Cookie
+	for _, c := range w2.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			tlsCookie = c
+			break
+		}
+	}
+	if tlsCookie == nil {
+		t.Fatal("session cookie not set on TLS login")
+	}
+	if !tlsCookie.Secure {
+		t.Error("session cookie should have Secure flag on HTTPS")
+	}
+
+	// Clean up
 	ctx := context.Background()
 	rdb.Del(ctx, m.key("session", sessionCookie.Value))
+	rdb.Del(ctx, m.key("session", tlsCookie.Value))
 }
 
 // --- Security: Strip X-GQM-User header (M3) ---

@@ -124,6 +124,11 @@ func effectiveRole(role string) string {
 	return role
 }
 
+// isSecure reports whether the request was made over HTTPS.
+func isSecure(r *http.Request) bool {
+	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
 // handleLogin authenticates a user and creates a session.
 func (m *Monitor) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !m.cfg.AuthEnabled {
@@ -203,14 +208,18 @@ func (m *Monitor) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set cookie
+	// Set cookie — Secure only over HTTPS to avoid cookie rejection on plain HTTP
+	sameSite := http.SameSiteLaxMode
+	if isSecure(r) {
+		sameSite = http.SameSiteStrictMode
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		Secure:   isSecure(r),
+		SameSite: sameSite,
 		MaxAge:   m.cfg.AuthSessionTTL,
 	})
 
@@ -227,14 +236,18 @@ func (m *Monitor) handleLogout(w http.ResponseWriter, r *http.Request) {
 		m.rdb.Del(r.Context(), sessionKey)
 	}
 
-	// Clear cookie
+	// Clear cookie — match Secure flag to the request scheme
+	sameSite := http.SameSiteLaxMode
+	if isSecure(r) {
+		sameSite = http.SameSiteStrictMode
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		Secure:   isSecure(r),
+		SameSite: sameSite,
 		MaxAge:   -1,
 	})
 

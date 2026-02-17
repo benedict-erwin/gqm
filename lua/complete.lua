@@ -22,6 +22,9 @@ redis.call('HSET', KEYS[3],
     'completed_at', ARGV[2],
     'execution_duration', ARGV[4])
 
+-- Clear error from previous failed attempts (if any).
+redis.call('HDEL', KEYS[3], 'error')
+
 if ARGV[3] ~= '' then
     redis.call('HSET', KEYS[3], 'result', ARGV[3])
 end

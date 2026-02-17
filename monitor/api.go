@@ -26,6 +26,9 @@ func (m *Monitor) setupRoutes() {
 
 	m.mux.HandleFunc("GET /api/v1/jobs/{id}", m.requireAuth(m.handleGetJob))
 
+	m.mux.HandleFunc("GET /api/v1/servers", m.requireAuth(m.handleListServers))
+	m.mux.HandleFunc("GET /api/v1/servers/{id}", m.requireAuth(m.handleGetServer))
+
 	m.mux.HandleFunc("GET /api/v1/workers", m.requireAuth(m.handleListWorkers))
 	m.mux.HandleFunc("GET /api/v1/workers/{id}", m.requireAuth(m.handleGetWorker))
 
@@ -56,14 +59,18 @@ func (m *Monitor) setupRoutes() {
 	m.mux.HandleFunc("POST /api/v1/cron/{id}/enable", m.requireAuth(m.requireAdmin(m.handleEnableCron)))
 	m.mux.HandleFunc("POST /api/v1/cron/{id}/disable", m.requireAuth(m.requireAdmin(m.handleDisableCron)))
 
-	// Dashboard placeholder
+	// Dashboard — static files served without auth (JS checks /auth/me on init)
 	if m.cfg.DashEnabled {
 		prefix := m.cfg.DashPathPrefix
 		if prefix == "" {
 			prefix = "/dashboard"
 		}
-		m.mux.HandleFunc("GET "+prefix, m.requireAuth(m.handleDashboard))
-		m.mux.HandleFunc("GET "+prefix+"/", m.requireAuth(m.handleDashboard))
+		fs := m.dashboardFileServer()
+		m.mux.Handle("GET "+prefix+"/", http.StripPrefix(prefix, fs))
+		// Redirect /dashboard to /dashboard/
+		m.mux.HandleFunc("GET "+prefix, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, prefix+"/", http.StatusMovedPermanently)
+		})
 	}
 }
 
@@ -130,10 +137,12 @@ func queryInt(r *http.Request, key string, def int) int {
 // maxRequestBody is the maximum allowed request body size (1 MB).
 const maxRequestBody = 1 << 20
 
-// validPathParam matches safe path parameter values: alphanumeric, hyphens, underscores, dots.
-// Max length 256 chars. Rejects empty values, colons (Redis key separator), slashes, and other
-// special characters to prevent Redis key confusion.
-var validPathParam = regexp.MustCompile(`^[a-zA-Z0-9._@\-]{1,256}$`)
+// validPathParam matches safe path parameter values for use in Redis key lookups.
+// Allows alphanumeric, hyphens, underscores, dots, @ signs, and colons.
+// Colons are required because job types use "namespace:action" convention (e.g., "email:send")
+// and implicit pools derive queue names from the job type.
+// Max 256 chars. Rejects slashes, spaces, and other special characters.
+var validPathParam = regexp.MustCompile(`^[a-zA-Z0-9._@:\-]{1,256}$`)
 
 // validatePathParam checks a path parameter value is safe to use in Redis keys.
 // Returns an empty string and writes a 400 error if invalid.

@@ -11,7 +11,8 @@ import (
 
 func testAdminServer(t *testing.T) (*Server, *redis.Client) {
 	t.Helper()
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	addr := testRedisAddr()
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -21,7 +22,7 @@ func testAdminServer(t *testing.T) (*Server, *redis.Client) {
 	prefix := "gqmadmintest:" + t.Name() + ":"
 
 	s, err := NewServer(
-		WithServerRedis("localhost:6379"),
+		WithServerRedis(addr),
 		WithServerRedisOpts(WithPrefix(prefix)),
 	)
 	if err != nil {

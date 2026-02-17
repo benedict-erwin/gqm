@@ -664,10 +664,12 @@ func (p *pool) sendHeartbeat(ctx context.Context) {
 	pipe.HSet(ctx, workerKey,
 		"id", p.cfg.name,
 		"pool", p.cfg.name,
+		"server_id", p.server.serverID,
 		"queues", strings.Join(p.cfg.queues, ","),
 		"status", "active",
 		"last_heartbeat", now,
 		"concurrency", p.cfg.concurrency,
+		"started_at", p.server.startedAt.Unix(),
 	)
 	pipe.SAdd(ctx, rc.Key("workers"), p.cfg.name)
 	// Set TTL so stale worker keys auto-expire on crash (3x heartbeat interval).
