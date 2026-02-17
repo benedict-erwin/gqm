@@ -30,7 +30,7 @@ GQM.pages.scheduler = {
                 var statusBadge = enabled ? GQM.utils.statusBadge('active') : GQM.utils.statusBadge('paused');
                 return '<tr>' +
                     '<td class="mono">' + GQM.utils.escapeHTML(e.id || '') + '</td>' +
-                    '<td>' + GQM.utils.escapeHTML(e.expression || '') + '</td>' +
+                    '<td class="mono">' + GQM.utils.escapeHTML(e.cron_expr || '') + '</td>' +
                     '<td>' + GQM.utils.escapeHTML(e.job_type || '') + '</td>' +
                     '<td>' + GQM.utils.escapeHTML(e.queue || '') + '</td>' +
                     '<td>' + statusBadge + '</td>' +
