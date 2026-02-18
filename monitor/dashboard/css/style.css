@@ -638,3 +638,55 @@ label {
 
 .checkbox-col { width: 32px; text-align: center; }
 input[type="checkbox"] { cursor: pointer; }
+
+/* --- DAG Page --- */
+.dag-toolbar {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.dag-toolbar input[type="text"] {
+    flex: 1;
+    min-width: 200px;
+}
+.dag-graph-container {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    height: 500px;
+    position: relative;
+}
+.dag-legend {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    font-size: 0.8rem;
+    color: var(--color-text-secondary);
+    padding: 0.5rem 0;
+}
+.dag-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+.dag-legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    border: 2px solid;
+    display: inline-block;
+}
+.dag-node-detail {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 1rem;
+}
+.dag-node-detail dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.25rem 1rem;
+}
+.dag-node-detail dt { font-weight: 600; color: var(--color-text-secondary); font-size: 0.85rem; }
+.dag-node-detail dd { margin: 0; }

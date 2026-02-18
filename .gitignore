@@ -9,6 +9,7 @@
 *.test
 
 # Go build output
+/gqm
 /cmd/gqm/gqm
 /dashboard-dev
 

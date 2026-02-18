@@ -155,7 +155,7 @@ GQM.app = {
                 if (pages.scheduler) pages.scheduler.render(app);
                 break;
             case 'dag':
-                if (pages.dag) pages.dag.render(app);
+                if (pages.dag) pages.dag.render(app, param);
                 break;
             default:
                 app.innerHTML = '<div class="empty-state"><p>Page not found</p></div>';

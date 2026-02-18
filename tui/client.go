@@ -114,7 +114,9 @@ func (j Job) int64val(key string) int64 {
 			return int64(t)
 		case string:
 			var n int64
-			fmt.Sscanf(t, "%d", &n)
+			if _, err := fmt.Sscanf(t, "%d", &n); err != nil {
+				return 0
+			}
 			return n
 		}
 	}
@@ -221,7 +223,10 @@ func (c *Client) get(path string, result any) error {
 		return fmt.Errorf("unauthorized (check API key)")
 	}
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("API error %d (failed to read body: %w)", resp.StatusCode, err)
+		}
 		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -257,7 +262,10 @@ func (c *Client) post(path string) error {
 		return fmt.Errorf("unauthorized (check API key)")
 	}
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("API error %d (failed to read body: %w)", resp.StatusCode, err)
+		}
 		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 	return nil

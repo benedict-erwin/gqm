@@ -1125,12 +1125,24 @@ func TestAdminDLQ_RetryAllSuccess(t *testing.T) {
 }
 
 func TestAdminDLQ_ClearSuccess(t *testing.T) {
-	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m, rdb := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
 	m.startedAt = time.Now()
+
+	rdb.SAdd(context.Background(), m.key("queues"), "default")
 
 	w := doRequest(m, "DELETE", "/api/v1/queues/default/dead-letter/clear", "")
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", w.Code)
+	}
+}
+
+func TestAdminDLQ_ClearNotFound(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "DELETE", "/api/v1/queues/nonexistent/dead-letter/clear", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("clear DLQ nonexistent queue: status = %d, want 404", w.Code)
 	}
 }
 
@@ -2417,5 +2429,330 @@ func TestSecurity_GetWorkersNoSideEffect(t *testing.T) {
 	}
 	if !isMember {
 		t.Error("stale worker entry was removed from set — GET should not have side effects")
+	}
+}
+
+// --- DAG endpoints ---
+
+func TestDAG_ListDeferredEmpty(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "GET", "/api/v1/dag/deferred", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data, ok := resp.Data.([]any)
+	if !ok {
+		t.Fatalf("data type = %T", resp.Data)
+	}
+	if len(data) != 0 {
+		t.Errorf("data len = %d, want 0", len(data))
+	}
+	if resp.Meta == nil {
+		t.Fatal("meta is nil")
+	}
+	if resp.Meta.Total != 0 {
+		t.Errorf("total = %d, want 0", resp.Meta.Total)
+	}
+}
+
+func TestDAG_ListDeferredWithData(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	// Seed deferred jobs.
+	rdb.SAdd(ctx, m.key("deferred"), "child-1", "child-2")
+	rdb.HSet(ctx, m.key("job", "child-1"),
+		"id", "child-1",
+		"type", "report.generate",
+		"queue", "default",
+		"status", "deferred",
+		"depends_on", `["parent-1"]`,
+		"created_at", "1708300000",
+	)
+	rdb.HSet(ctx, m.key("job", "child-2"),
+		"id", "child-2",
+		"type", "email.send",
+		"queue", "email",
+		"status", "deferred",
+		"depends_on", `["parent-1","parent-2"]`,
+		"created_at", "1708300100",
+	)
+	rdb.SAdd(ctx, m.key("job", "child-1", "pending_deps"), "parent-1")
+	rdb.SAdd(ctx, m.key("job", "child-2", "pending_deps"), "parent-1", "parent-2")
+
+	w := doRequest(m, "GET", "/api/v1/dag/deferred", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data, ok := resp.Data.([]any)
+	if !ok {
+		t.Fatalf("data type = %T", resp.Data)
+	}
+	if len(data) != 2 {
+		t.Errorf("data len = %d, want 2", len(data))
+	}
+	if resp.Meta.Total != 2 {
+		t.Errorf("total = %d, want 2", resp.Meta.Total)
+	}
+
+	// Check that pending_deps is present.
+	first := data[0].(map[string]any)
+	pending, ok := first["pending_deps"].([]any)
+	if !ok {
+		t.Fatalf("pending_deps type = %T", first["pending_deps"])
+	}
+	if len(pending) == 0 {
+		t.Error("pending_deps should not be empty")
+	}
+}
+
+func TestDAG_ListRootsEmpty(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "GET", "/api/v1/dag/roots", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data, ok := resp.Data.([]any)
+	if !ok {
+		t.Fatalf("data type = %T", resp.Data)
+	}
+	if len(data) != 0 {
+		t.Errorf("data len = %d, want 0", len(data))
+	}
+}
+
+func TestDAG_ListRootsWithData(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	// Create parent with dependents set.
+	rdb.HSet(ctx, m.key("job", "parent-1"),
+		"id", "parent-1",
+		"type", "data:export",
+		"queue", "default",
+		"status", "completed",
+		"created_at", "1708300000",
+	)
+	rdb.SAdd(ctx, m.key("job", "parent-1", "dependents"), "child-1", "child-2")
+
+	rdb.HSet(ctx, m.key("job", "parent-2"),
+		"id", "parent-2",
+		"type", "report:generate",
+		"queue", "default",
+		"status", "processing",
+		"created_at", "1708300100",
+	)
+	rdb.SAdd(ctx, m.key("job", "parent-2", "dependents"), "child-3")
+
+	w := doRequest(m, "GET", "/api/v1/dag/roots", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	json.NewDecoder(w.Body).Decode(&resp)
+	data, ok := resp.Data.([]any)
+	if !ok {
+		t.Fatalf("data type = %T", resp.Data)
+	}
+	if len(data) != 2 {
+		t.Errorf("data len = %d, want 2", len(data))
+	}
+	if resp.Meta.Total != 2 {
+		t.Errorf("total = %d, want 2", resp.Meta.Total)
+	}
+
+	// Check child_count is present.
+	first := data[0].(map[string]any)
+	cc, ok := first["child_count"]
+	if !ok {
+		t.Fatal("child_count missing")
+	}
+	count := cc.(float64)
+	if count < 1 {
+		t.Errorf("child_count = %v, want >= 1", count)
+	}
+}
+
+func TestDAG_GraphNotFound(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	w := doRequest(m, "GET", "/api/v1/dag/graph/nonexistent-id", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp["data"].(map[string]any)
+
+	nodes := data["nodes"].([]any)
+	if len(nodes) != 1 {
+		t.Errorf("nodes len = %d, want 1 (unknown placeholder)", len(nodes))
+	}
+	// The placeholder node should have status "unknown".
+	node := nodes[0].(map[string]any)
+	if node["status"] != "unknown" {
+		t.Errorf("status = %v, want unknown", node["status"])
+	}
+}
+
+func TestDAG_GraphSingleNode(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	rdb.HSet(ctx, m.key("job", "solo-job"),
+		"id", "solo-job",
+		"type", "data.process",
+		"queue", "default",
+		"status", "completed",
+		"created_at", "1708300000",
+	)
+
+	w := doRequest(m, "GET", "/api/v1/dag/graph/solo-job", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp["data"].(map[string]any)
+
+	nodes := data["nodes"].([]any)
+	edges := data["edges"].([]any)
+	if len(nodes) != 1 {
+		t.Errorf("nodes = %d, want 1", len(nodes))
+	}
+	if len(edges) != 0 {
+		t.Errorf("edges = %d, want 0", len(edges))
+	}
+	if data["root_id"] != "solo-job" {
+		t.Errorf("root_id = %v", data["root_id"])
+	}
+}
+
+func TestDAG_GraphWithDeps(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	// Create parent → child relationship.
+	rdb.HSet(ctx, m.key("job", "parent-1"),
+		"id", "parent-1",
+		"type", "data.fetch",
+		"queue", "default",
+		"status", "completed",
+		"created_at", "1708300000",
+	)
+	rdb.HSet(ctx, m.key("job", "child-1"),
+		"id", "child-1",
+		"type", "data.process",
+		"queue", "default",
+		"status", "deferred",
+		"depends_on", `["parent-1"]`,
+		"created_at", "1708300100",
+	)
+
+	// Set up dependents relationship (parent knows about child).
+	rdb.SAdd(ctx, m.key("job", "parent-1", "dependents"), "child-1")
+
+	// Load graph from child-1 (should discover parent-1 via depends_on).
+	w := doRequest(m, "GET", "/api/v1/dag/graph/child-1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp["data"].(map[string]any)
+
+	nodes := data["nodes"].([]any)
+	edges := data["edges"].([]any)
+
+	if len(nodes) != 2 {
+		t.Errorf("nodes = %d, want 2", len(nodes))
+	}
+	if len(edges) < 1 {
+		t.Errorf("edges = %d, want >= 1", len(edges))
+	}
+
+	// Verify edge direction: parent-1 → child-1.
+	edge := edges[0].(map[string]any)
+	if edge["source"] != "parent-1" || edge["target"] != "child-1" {
+		t.Errorf("edge = %v → %v, want parent-1 → child-1", edge["source"], edge["target"])
+	}
+}
+
+func TestDAG_GraphDepthLimit(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	// Create a chain: a → b → c → d → e (depth 4).
+	ids := []string{"a", "b", "c", "d", "e"}
+	for i, id := range ids {
+		fields := map[string]any{
+			"id":     id,
+			"type":   "chain.step",
+			"queue":  "default",
+			"status": "completed",
+		}
+		if i > 0 {
+			// Each node depends on the previous one.
+			fields["depends_on"] = fmt.Sprintf(`["%s"]`, ids[i-1])
+		}
+		rdb.HSet(ctx, m.key("job", id), fields)
+		if i > 0 {
+			rdb.SAdd(ctx, m.key("job", ids[i-1], "dependents"), id)
+		}
+	}
+
+	// Request with depth=2 from "a": should get a, b, c (depth 0, 1, 2).
+	w := doRequest(m, "GET", "/api/v1/dag/graph/a?depth=2", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	data := resp["data"].(map[string]any)
+
+	nodes := data["nodes"].([]any)
+	// With depth=2 from "a": a (depth 0), b (depth 1, via dependents), c (depth 2, via dependents).
+	// d and e should not be included.
+	if len(nodes) > 3 {
+		nodeIDs := make([]string, len(nodes))
+		for i, n := range nodes {
+			nodeIDs[i] = n.(map[string]any)["id"].(string)
+		}
+		t.Errorf("nodes = %v, want at most 3 (depth limit)", nodeIDs)
+	}
+}
+
+func TestDAG_GraphInvalidID(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	// Use characters that are invalid per validPathParam but safe in HTTP paths.
+	w := doRequest(m, "GET", "/api/v1/dag/graph/invalid%20id", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }

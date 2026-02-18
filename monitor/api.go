@@ -54,6 +54,11 @@ func (m *Monitor) setupRoutes() {
 	m.mux.HandleFunc("POST /api/v1/queues/{name}/dead-letter/retry-all", m.requireAuth(m.requireAdmin(m.handleRetryAllDLQ)))
 	m.mux.HandleFunc("DELETE /api/v1/queues/{name}/dead-letter/clear", m.requireAuth(m.requireAdmin(m.handleClearDLQ)))
 
+	// DAG endpoints — read-only, require auth
+	m.mux.HandleFunc("GET /api/v1/dag/roots", m.requireAuth(m.handleListDAGRoots))
+	m.mux.HandleFunc("GET /api/v1/dag/deferred", m.requireAuth(m.handleListDeferred))
+	m.mux.HandleFunc("GET /api/v1/dag/graph/{id}", m.requireAuth(m.handleDAGGraph))
+
 	// Write endpoints — Cron (require admin role)
 	m.mux.HandleFunc("POST /api/v1/cron/{id}/trigger", m.requireAuth(m.requireAdmin(m.handleTriggerCron)))
 	m.mux.HandleFunc("POST /api/v1/cron/{id}/enable", m.requireAuth(m.requireAdmin(m.handleEnableCron)))

@@ -133,6 +133,18 @@ func (m *Monitor) handleClearDLQ(w http.ResponseWriter, r *http.Request) {
 	if !validatePathParam(w, "name", name) {
 		return
 	}
+
+	// Verify queue exists before clearing DLQ.
+	exists, err := m.rdb.SIsMember(r.Context(), m.key("queues"), name).Result()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "queue not found", "NOT_FOUND")
+		return
+	}
+
 	cleared, err := m.admin.ClearDLQ(r.Context(), name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")

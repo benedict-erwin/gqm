@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/benedict-erwin/gqm/tui"
@@ -40,6 +41,12 @@ Flags:`)
 	if *apiURL == "" {
 		fmt.Fprintln(os.Stderr, "gqm: --api-url or GQM_API_URL is required")
 		fs.Usage()
+		os.Exit(1)
+	}
+
+	u, err := url.Parse(*apiURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		fmt.Fprintln(os.Stderr, "gqm: --api-url must be a valid URL (e.g., http://localhost:8080)")
 		os.Exit(1)
 	}
 
