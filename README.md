@@ -320,15 +320,91 @@ scheduler:
 
 ### Web Dashboard
 
-Enable with `WithDashboard(true)`. Features: queue overview, job browser, worker status, failed job management, cron control. Auth supports session cookies (bcrypt) and API keys, with admin/viewer roles and CSRF protection. Health check at `GET /health` (no auth).
+Embedded vanilla HTML/CSS/JS dashboard — no build step, no npm. Served directly from the Go binary via `embed.FS`.
+
+**Enable programmatically:**
+
+```go
+server, _ := gqm.NewServer(
+    gqm.WithServerRedis("localhost:6379"),
+    gqm.WithAPI(true, ":8080"),
+    gqm.WithDashboard(true),
+    gqm.WithAuthEnabled(true),
+    gqm.WithAuthUsers([]gqm.AuthUser{
+        {Username: "admin", PasswordHash: "$2a$10$...", Role: "admin"},
+        {Username: "viewer", PasswordHash: "$2a$10$...", Role: "viewer"},
+    }),
+    gqm.WithAPIKeys([]gqm.AuthAPIKey{
+        {Name: "grafana", Key: "gqm_ak_...", Role: "viewer"},
+    }),
+)
+// Dashboard: http://localhost:8080/dashboard/
+// Health:    http://localhost:8080/health (no auth)
+```
+
+**Or via YAML config:**
+
+```yaml
+monitoring:
+  api:
+    enabled: true
+    addr: ":8080"
+  dashboard:
+    enabled: true
+    # path_prefix: "/dashboard"     # default
+    # custom_dir: "./my-dashboard"  # override embedded assets
+  auth:
+    enabled: true
+    users:
+      - username: admin
+        password_hash: ""  # generate with: gqm hash-password
+        role: admin
+```
+
+**Dashboard pages:**
+
+| Page | Description |
+|------|-------------|
+| Overview | Job stats with Chart.js graphs, stat cards per status |
+| Servers | Live server heartbeats, uptime, active jobs |
+| Queues | Queue sizes, pause/resume, empty queue, DLQ retry |
+| Workers | Per-pool worker status, active job tracking |
+| Failed / DLQ | Failed job browser, retry/delete individual or batch |
+| Scheduler | Cron entries, next/last run, trigger/enable/disable |
+| DAG | Dependency graph visualization with Cytoscape.js |
+
+**Auth & security:** Session cookies (bcrypt + HttpOnly/Secure/SameSite), API keys with constant-time comparison, RBAC (admin/viewer), CSRF protection, login rate limiting. Health check at `GET /health` requires no auth.
 
 ### TUI
 
+Terminal UI for quick monitoring without a browser. Connects to a running GQM server via the HTTP API.
+
 ```bash
+# Requires a server with monitoring enabled (WithAPI or monitoring.enabled in YAML)
 gqm tui --api-url http://localhost:8080 --api-key gqm_ak_xxx
+
+# Or via environment variables
+export GQM_API_URL=http://localhost:8080
+export GQM_API_KEY=gqm_ak_xxx
+gqm tui
 ```
 
-4 tabs: Queues, Workers, Failed/DLQ, Cron. Live auto-refresh, keyboard actions (pause/resume, retry, trigger cron).
+4 tabs: Queues, Workers, Failed, Cron. Auto-refreshes every second.
+
+**Keyboard shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `1-4` | Switch tab directly |
+| `Tab` / `Shift+Tab` | Cycle tabs |
+| `j/k` or `Up/Down` | Navigate list |
+| `h/l` or `Left/Right` | Switch queue (Failed tab) |
+| `p` | Pause/resume queue (Queues tab) |
+| `r` | Retry failed job (Failed tab) |
+| `t` | Trigger cron entry (Cron tab) |
+| `e` | Enable/disable cron entry (Cron tab) |
+| `F5` | Force refresh |
+| `q` / `Ctrl+C` | Quit |
 
 ### CLI
 
@@ -340,7 +416,7 @@ gqm revoke-api-key <name>   Remove API key from config
 gqm hash-password           Generate bcrypt hash
 gqm generate-api-key        Generate random API key
 gqm dashboard export <dir>  Export embedded dashboard for customization
-gqm tui                     Launch terminal monitor
+gqm tui [--api-url <url>] [--api-key <key>]  Launch terminal monitor
 gqm version                 Show version
 ```
 
