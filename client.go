@@ -218,6 +218,130 @@ func (c *Client) EnqueueIn(ctx context.Context, delay time.Duration, jobType str
 	return c.EnqueueAt(ctx, time.Now().Add(delay), jobType, payload, opts...)
 }
 
+// BatchItem represents a single job to be enqueued in a batch.
+type BatchItem struct {
+	JobType string
+	Payload Payload
+	Options []EnqueueOption
+}
+
+// maxBatchEnqueueSize is the maximum number of items allowed in a single
+// EnqueueBatch call. Each item generates 2-3 Redis commands, so this
+// limits the pipeline to a manageable size.
+const maxBatchEnqueueSize = 1000
+
+// EnqueueBatch creates multiple jobs in a single Redis pipeline for
+// efficiency. All jobs are validated upfront (including serialization);
+// if any item fails validation, no jobs are enqueued and the error
+// identifies the failing item.
+//
+// The pipeline is NOT a Redis transaction — on network errors, some jobs
+// may have been created while others were not. Callers should treat a
+// pipeline error as "unknown state" and verify job existence if needed.
+//
+// Maximum batch size is 1000 items. Returns ErrBatchTooLarge if exceeded.
+//
+// Limitations compared to single Enqueue:
+//   - Unique() is not supported (returns error if set on any item).
+//   - DependsOn() is not supported (returns error if set on any item).
+//   - EnqueueAtFront() is not supported (returns error if set on any item).
+//
+// Use individual Enqueue calls if you need uniqueness, DAG dependencies,
+// or front-of-queue insertion.
+func (c *Client) EnqueueBatch(ctx context.Context, items []BatchItem) ([]*Job, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if len(items) > maxBatchEnqueueSize {
+		return nil, fmt.Errorf("%w: got %d", ErrBatchTooLarge, len(items))
+	}
+
+	// Phase 1: validate, build all jobs, and serialize upfront.
+	jobs := make([]*Job, len(items))
+	jobMaps := make([]map[string]any, len(items))
+	seenIDs := make(map[string]int, len(items))
+	uniqueQueues := make(map[string]struct{})
+
+	for i, item := range items {
+		if item.JobType == "" {
+			return nil, fmt.Errorf("batch item %d: %w", i, ErrInvalidJobType)
+		}
+
+		job := NewJob(item.JobType, item.Payload)
+		for _, opt := range item.Options {
+			opt(job)
+		}
+
+		if err := validateJobInputs(job); err != nil {
+			return nil, fmt.Errorf("batch item %d: %w", i, err)
+		}
+		if len(job.DependsOn) > 0 {
+			return nil, fmt.Errorf("batch item %d: %w", i, ErrBatchDependsOn)
+		}
+		if job.unique {
+			return nil, fmt.Errorf("batch item %d: %w", i, ErrBatchUnique)
+		}
+		if job.EnqueueAtFront {
+			return nil, fmt.Errorf("batch item %d: %w", i, ErrBatchEnqueueAtFront)
+		}
+		if job.Status != StatusReady {
+			return nil, fmt.Errorf("batch item %d: job status must be ready, got %q", i, job.Status)
+		}
+		if job.ScheduledAt != 0 {
+			return nil, fmt.Errorf("batch item %d: ScheduledAt is not supported in EnqueueBatch (use EnqueueAt)", i)
+		}
+
+		// Duplicate job ID detection within the batch.
+		if prev, ok := seenIDs[job.ID]; ok {
+			return nil, fmt.Errorf("batch item %d: duplicate job ID %q (same as item %d)", i, job.ID, prev)
+		}
+		seenIDs[job.ID] = i
+
+		// Serialize now so ToMap errors fail the whole batch before any
+		// pipeline commands are queued.
+		jobMap, err := job.ToMap()
+		if err != nil {
+			return nil, fmt.Errorf("batch item %d: converting to map: %w", i, err)
+		}
+
+		jobs[i] = job
+		jobMaps[i] = jobMap
+		uniqueQueues[job.Queue] = struct{}{}
+	}
+
+	// Check context before building pipeline.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	// Phase 2: build a single pipeline from pre-validated data.
+	queuesKey := c.rc.Key("queues")
+	pipe := c.rc.rdb.Pipeline()
+
+	for i, job := range jobs {
+		jobKey := c.rc.Key("job", job.ID)
+		queueKey := c.rc.Key("queue", job.Queue, "ready")
+
+		pipe.HSet(ctx, jobKey, jobMaps[i])
+		pipe.LPush(ctx, queueKey, job.ID)
+	}
+
+	// Single SAdd for all unique queues.
+	if len(uniqueQueues) > 0 {
+		queues := make([]any, 0, len(uniqueQueues))
+		for q := range uniqueQueues {
+			queues = append(queues, q)
+		}
+		pipe.SAdd(ctx, queuesKey, queues...)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("executing batch enqueue pipeline: %w", err)
+	}
+
+	return jobs, nil
+}
+
 // GetJob retrieves a job by ID from Redis.
 func (c *Client) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	jobKey := c.rc.Key("job", jobID)

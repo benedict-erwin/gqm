@@ -44,4 +44,21 @@ var (
 
 	// ErrInvalidJobID is returned when a job ID contains invalid characters.
 	ErrInvalidJobID = errors.New("gqm: invalid job ID (only alphanumeric, hyphen, underscore, dot allowed; max 256 chars)")
+
+	// ErrSkipRetry can be returned (or wrapped) by a handler to skip all
+	// remaining retries and move the job directly to the dead letter queue.
+	ErrSkipRetry = errors.New("gqm: skip retry")
+
+	// ErrBatchTooLarge is returned when EnqueueBatch receives more items
+	// than the maximum allowed batch size.
+	ErrBatchTooLarge = errors.New("gqm: batch size exceeds maximum (1000)")
+
+	// ErrBatchDependsOn is returned when DependsOn is used in EnqueueBatch.
+	ErrBatchDependsOn = errors.New("gqm: DependsOn is not supported in EnqueueBatch")
+
+	// ErrBatchUnique is returned when Unique is used in EnqueueBatch.
+	ErrBatchUnique = errors.New("gqm: Unique is not supported in EnqueueBatch")
+
+	// ErrBatchEnqueueAtFront is returned when EnqueueAtFront is used in EnqueueBatch.
+	ErrBatchEnqueueAtFront = errors.New("gqm: EnqueueAtFront is not supported in EnqueueBatch")
 )

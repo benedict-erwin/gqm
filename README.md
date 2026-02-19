@@ -5,13 +5,18 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 ## Features
 
 - **Worker pool isolation** — Dedicated goroutine pools per job type with independent concurrency, timeout, and retry policies
-- **DAG job dependencies** — Linear chains or full DAG with cycle detection, cascade cancellation, and per-dependency failure tolerance
+- **DAG job dependencies** — Linear chains or full DAG (Directed Acyclic Graph) with cycle detection, cascade cancellation, and per-dependency failure tolerance
 - **Cron scheduler** — 6-field cron expressions (incl. seconds), overlap policies (skip/allow/replace), timezone support, distributed locking
 - **Delayed jobs** — Schedule jobs for future execution with `EnqueueAt()` / `EnqueueIn()`
 - **Retry & dead letter queue** — Configurable retry with fixed/exponential/custom backoff, automatic DLQ after max retries
 - **Unique jobs** — Idempotent enqueue via `Unique()` option (backed by atomic `HSETNX`)
 - **Dequeue strategies** — Strict priority, round-robin, or weighted (default) across multi-queue pools
 - **Timeout hierarchy** — Job-level → pool-level → global default (always enforced, never disabled)
+- **Middleware** — Global handler middleware chain via `Server.Use()` for logging, metrics, tracing
+- **Error classification** — `IsFailure` predicate separates transient errors (retry without counting) from real failures
+- **Skip retry** — `ErrSkipRetry` sentinel error bypasses all retries, sends job directly to DLQ
+- **Job callbacks** — `OnSuccess`, `OnFailure`, `OnComplete` per-handler callbacks with panic recovery
+- **Bulk enqueue** — `EnqueueBatch()` creates up to 1000 jobs in a single Redis pipeline
 - **Panic recovery** — Handler panics are caught per-goroutine; worker pools remain operational
 - **Graceful shutdown** — In-flight jobs complete before exit, with configurable grace period
 - **YAML config** — Full config-file-driven deployment with 20+ structural validation rules
@@ -222,6 +227,98 @@ client.Enqueue("report.generate", payload,
     gqm.AllowFailure(true),                    // run even if parent fails
 )
 ```
+
+## Middleware
+
+Register global middleware that wraps every handler. Middleware executes in registration order (onion model: a → b → handler → b → a).
+
+```go
+srv.Use(func(next gqm.Handler) gqm.Handler {
+    return func(ctx context.Context, job *gqm.Job) error {
+        slog.Info("job start", "id", job.ID, "type", job.Type)
+        start := time.Now()
+        err := next(ctx, job)
+        slog.Info("job done", "id", job.ID, "duration", time.Since(start), "error", err)
+        return err
+    }
+})
+```
+
+`Use()` returns an error if called after `Start()` or with a nil middleware. Register all middleware before starting the server.
+
+## Error Classification
+
+### ErrSkipRetry
+
+Wrap any error with `ErrSkipRetry` to bypass all retries and send the job directly to the dead letter queue:
+
+```go
+server.Handle("payment.charge", func(ctx context.Context, job *gqm.Job) error {
+    err := gateway.Charge(ctx, job.Payload["card_id"])
+    if errors.Is(err, ErrInvalidCard) {
+        return fmt.Errorf("invalid card: %w", gqm.ErrSkipRetry) // no retry, straight to DLQ
+    }
+    return err // normal retry on other errors
+})
+```
+
+### IsFailure Predicate
+
+Classify handler errors as transient or real failures. Transient errors (predicate returns `false`) retry without incrementing the retry counter — they don't count toward the retry limit:
+
+```go
+server.Handle("api.call", apiHandler,
+    gqm.Workers(3),
+    gqm.IsFailure(func(err error) bool {
+        // Rate limits and timeouts are transient — retry indefinitely
+        if errors.Is(err, ErrRateLimit) || errors.Is(err, context.DeadlineExceeded) {
+            return false
+        }
+        return true // everything else counts as a real failure
+    }),
+)
+```
+
+## Job Callbacks
+
+Per-handler callbacks fire after job execution. All callbacks include panic recovery.
+
+```go
+server.Handle("order.process", orderHandler,
+    gqm.Workers(5),
+
+    gqm.OnSuccess(func(ctx context.Context, job *gqm.Job) {
+        metrics.OrderProcessed.Inc()
+    }),
+
+    gqm.OnFailure(func(ctx context.Context, job *gqm.Job, err error) {
+        alerting.Notify(fmt.Sprintf("order %s failed: %v", job.ID, err))
+    }),
+
+    gqm.OnComplete(func(ctx context.Context, job *gqm.Job, err error) {
+        audit.Log("order.process", job.ID, err)
+    }),
+)
+```
+
+Callbacks run synchronously in the worker goroutine before the next job is dequeued. Keep them fast — for heavy work, spawn a goroutine inside the callback.
+
+## Bulk Enqueue
+
+Create multiple jobs in a single Redis pipeline:
+
+```go
+items := []gqm.BatchItem{
+    {JobType: "email.send", Payload: gqm.Payload{"to": "a@x.com"}, Options: []gqm.EnqueueOption{gqm.MaxRetry(3)}},
+    {JobType: "email.send", Payload: gqm.Payload{"to": "b@x.com"}, Options: []gqm.EnqueueOption{gqm.MaxRetry(3)}},
+    {JobType: "email.send", Payload: gqm.Payload{"to": "c@x.com"}, Options: []gqm.EnqueueOption{gqm.MaxRetry(3)}},
+}
+
+jobs, err := client.EnqueueBatch(ctx, items)
+// jobs[0].ID, jobs[1].ID, jobs[2].ID — all created in one pipeline
+```
+
+**Limits:** max 1000 items per batch. `DependsOn`, `Unique`, and `EnqueueAtFront` are not supported in batch mode.
 
 ## Delayed & Scheduled Jobs
 

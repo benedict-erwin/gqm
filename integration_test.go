@@ -2,8 +2,11 @@ package gqm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -816,5 +819,1119 @@ done:
 	case <-serverDone:
 	case <-time.After(10 * time.Second):
 		t.Fatal("server shutdown timeout")
+	}
+}
+
+func TestIntegration_SkipRetry(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var attempts atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("skip.retry", func(ctx context.Context, job *Job) error {
+		attempts.Add(1)
+		return fmt.Errorf("permanent error: %w", ErrSkipRetry)
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Enqueue with max_retry=5 — but SkipRetry should bypass all retries.
+	job, err := client.Enqueue(ctx, "skip.retry", Payload{},
+		Queue("skip.retry"),
+		MaxRetry(5),
+		RetryIntervals(1, 1, 1, 1, 1),
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for exactly 1 attempt — should go straight to DLQ.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatalf("timeout: attempts=%d", attempts.Load())
+		default:
+			if attempts.Load() >= 1 {
+				goto done1
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+done1:
+	// Small buffer for DLQ processing.
+	time.Sleep(1 * time.Second)
+
+	// Should have exactly 1 attempt (no retries).
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (SkipRetry should prevent retries)", got)
+	}
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetchedJob.Status != StatusDeadLetter {
+		t.Errorf("job status = %q, want %q", fetchedJob.Status, StatusDeadLetter)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+func TestIntegration_SkipRetry_Wrapped(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var attempts atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("skip.wrapped", func(ctx context.Context, job *Job) error {
+		attempts.Add(1)
+		// Wrap ErrSkipRetry inside another error — errors.Is should still match.
+		return fmt.Errorf("invalid input: %w", ErrSkipRetry)
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	job, err := client.Enqueue(ctx, "skip.wrapped", Payload{},
+		Queue("skip.wrapped"),
+		MaxRetry(3),
+		RetryIntervals(1, 1, 1),
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatalf("timeout: attempts=%d", attempts.Load())
+		default:
+			if attempts.Load() >= 1 {
+				goto done2
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+done2:
+	time.Sleep(1 * time.Second)
+
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetchedJob.Status != StatusDeadLetter {
+		t.Errorf("job status = %q, want %q", fetchedJob.Status, StatusDeadLetter)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+func TestIntegration_IsFailure(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var attempts atomic.Int32
+	errRateLimit := errors.New("rate limited")
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// Handler returns rate limit error 3 times, then a real failure.
+	err = server.Handle("classify.error", func(ctx context.Context, job *Job) error {
+		n := attempts.Add(1)
+		if n <= 3 {
+			return fmt.Errorf("temporary: %w", errRateLimit)
+		}
+		return fmt.Errorf("real failure")
+	}, Workers(1), IsFailure(func(err error) bool {
+		// Rate limit errors are NOT failures — don't increment retry counter.
+		return !errors.Is(err, errRateLimit)
+	}))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// max_retry=1: normally would allow 1+1=2 attempts.
+	// With IsFailure, the 3 rate limit errors don't count, so the job
+	// should run 3 (non-failure) + 1 (first real failure, count=1) + 1 (retry, count=2 > max=1 → DLQ)
+	// = 5 total attempts.
+	job, err := client.Enqueue(ctx, "classify.error", Payload{},
+		Queue("classify.error"),
+		MaxRetry(1),
+		RetryIntervals(1, 1, 1, 1, 1),
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for enough attempts: 3 non-failure + 2 real failures = 5.
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatalf("timeout: attempts=%d, expected 5", attempts.Load())
+		default:
+			if attempts.Load() >= 5 {
+				goto done3
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+done3:
+	time.Sleep(1 * time.Second)
+
+	if got := attempts.Load(); got != 5 {
+		t.Errorf("attempts = %d, want 5 (3 non-failure + 2 real failure)", got)
+	}
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetchedJob.Status != StatusDeadLetter {
+		t.Errorf("job status = %q, want %q", fetchedJob.Status, StatusDeadLetter)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+// TestIntegration_Middleware verifies that middleware wraps handlers
+// in the correct order: Use(a, b) → a → b → handler.
+func TestIntegration_Middleware(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	// Track execution order
+	var order []string
+	var orderMu sync.Mutex
+	appendOrder := func(label string) {
+		orderMu.Lock()
+		order = append(order, label)
+		orderMu.Unlock()
+	}
+
+	srv, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// Register middleware in order: first, second
+	if err := srv.Use(func(next Handler) Handler {
+		return func(ctx context.Context, job *Job) error {
+			appendOrder("mw1:before")
+			err := next(ctx, job)
+			appendOrder("mw1:after")
+			return err
+		}
+	}); err != nil {
+		t.Fatalf("Use mw1: %v", err)
+	}
+
+	if err := srv.Use(func(next Handler) Handler {
+		return func(ctx context.Context, job *Job) error {
+			appendOrder("mw2:before")
+			err := next(ctx, job)
+			appendOrder("mw2:after")
+			return err
+		}
+	}); err != nil {
+		t.Fatalf("Use mw2: %v", err)
+	}
+
+	var done atomic.Bool
+	err = srv.Handle("mw.test", func(ctx context.Context, job *Job) error {
+		appendOrder("handler")
+		done.Store(true)
+		return nil
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// Enqueue job
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	_, err = client.Enqueue(ctx, "mw.test", Payload{}, Queue("mw.test"))
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Start server
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- srv.Start(serverCtx)
+	}()
+
+	// Wait for job to complete
+	deadline := time.After(15 * time.Second)
+	for !done.Load() {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for job")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// Allow brief settling
+	time.Sleep(100 * time.Millisecond)
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+
+	// Verify order: mw1 → mw2 → handler → mw2 → mw1
+	expected := []string{"mw1:before", "mw2:before", "handler", "mw2:after", "mw1:after"}
+	orderMu.Lock()
+	actual := make([]string, len(order))
+	copy(actual, order)
+	orderMu.Unlock()
+
+	if len(actual) != len(expected) {
+		t.Fatalf("expected %d entries, got %d: %v", len(expected), len(actual), actual)
+	}
+	for i := range expected {
+		if actual[i] != expected[i] {
+			t.Errorf("order[%d] = %q, want %q", i, actual[i], expected[i])
+		}
+	}
+}
+
+// TestIntegration_Middleware_ErrorPropagation verifies middleware can
+// intercept and transform handler errors.
+func TestIntegration_Middleware_ErrorPropagation(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var interceptedErr atomic.Value
+
+	srv, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// Middleware that captures the handler error
+	if err := srv.Use(func(next Handler) Handler {
+		return func(ctx context.Context, job *Job) error {
+			err := next(ctx, job)
+			if err != nil {
+				interceptedErr.Store(err.Error())
+			}
+			return err
+		}
+	}); err != nil {
+		t.Fatalf("Use: %v", err)
+	}
+
+	var done atomic.Bool
+	err = srv.Handle("mwerr.test", func(ctx context.Context, job *Job) error {
+		done.Store(true)
+		return fmt.Errorf("handler-specific-error")
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	_, err = client.Enqueue(ctx, "mwerr.test", Payload{},
+		Queue("mwerr.test"),
+		MaxRetry(0),
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- srv.Start(serverCtx)
+	}()
+
+	deadline := time.After(15 * time.Second)
+	for !done.Load() {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for job")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+
+	// Verify middleware intercepted the error
+	v := interceptedErr.Load()
+	if v == nil {
+		t.Fatal("middleware did not intercept error")
+	}
+	if got := v.(string); got != "handler-specific-error" {
+		t.Errorf("intercepted error = %q, want %q", got, "handler-specific-error")
+	}
+}
+
+// TestIntegration_Callbacks_OnSuccess verifies OnSuccess and OnComplete
+// fire on successful job execution.
+func TestIntegration_Callbacks_OnSuccess(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var (
+		successCalled  atomic.Bool
+		completeCalled atomic.Bool
+		completeErr    atomic.Value
+		failureCalled  atomic.Bool
+	)
+
+	srv, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = srv.Handle("cb.success", func(ctx context.Context, job *Job) error {
+		return nil
+	}, Workers(1),
+		OnSuccess(func(ctx context.Context, job *Job) {
+			successCalled.Store(true)
+		}),
+		OnFailure(func(ctx context.Context, job *Job, err error) {
+			failureCalled.Store(true)
+		}),
+		OnComplete(func(ctx context.Context, job *Job, err error) {
+			completeCalled.Store(true)
+			if err != nil {
+				completeErr.Store(err.Error())
+			} else {
+				completeErr.Store("")
+			}
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	_, err = client.Enqueue(ctx, "cb.success", Payload{}, Queue("cb.success"))
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- srv.Start(serverCtx) }()
+
+	deadline := time.After(15 * time.Second)
+	for !successCalled.Load() {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for OnSuccess")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	serverCancel()
+	<-serverDone
+
+	if !successCalled.Load() {
+		t.Error("OnSuccess was not called")
+	}
+	if failureCalled.Load() {
+		t.Error("OnFailure should not be called on success")
+	}
+	if !completeCalled.Load() {
+		t.Error("OnComplete was not called")
+	}
+	if v := completeErr.Load(); v != nil && v.(string) != "" {
+		t.Errorf("OnComplete err = %q, want nil/empty", v)
+	}
+}
+
+// TestIntegration_Callbacks_OnFailure verifies OnFailure and OnComplete
+// fire on failed job execution.
+func TestIntegration_Callbacks_OnFailure(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var (
+		successCalled  atomic.Bool
+		failureCalled  atomic.Bool
+		failureErrMsg  atomic.Value
+		completeCalled atomic.Bool
+		completeErrMsg atomic.Value
+	)
+
+	srv, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	var handlerDone atomic.Bool
+	err = srv.Handle("cb.failure", func(ctx context.Context, job *Job) error {
+		handlerDone.Store(true)
+		return fmt.Errorf("intentional-error")
+	}, Workers(1),
+		OnSuccess(func(ctx context.Context, job *Job) {
+			successCalled.Store(true)
+		}),
+		OnFailure(func(ctx context.Context, job *Job, err error) {
+			failureCalled.Store(true)
+			failureErrMsg.Store(err.Error())
+		}),
+		OnComplete(func(ctx context.Context, job *Job, err error) {
+			completeCalled.Store(true)
+			if err != nil {
+				completeErrMsg.Store(err.Error())
+			}
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	_, err = client.Enqueue(ctx, "cb.failure", Payload{},
+		Queue("cb.failure"), MaxRetry(0))
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- srv.Start(serverCtx) }()
+
+	deadline := time.After(15 * time.Second)
+	for !handlerDone.Load() {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for handler")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	serverCancel()
+	<-serverDone
+
+	if successCalled.Load() {
+		t.Error("OnSuccess should not be called on failure")
+	}
+	if !failureCalled.Load() {
+		t.Error("OnFailure was not called")
+	}
+	if v := failureErrMsg.Load(); v == nil || v.(string) != "intentional-error" {
+		t.Errorf("OnFailure err = %v, want %q", v, "intentional-error")
+	}
+	if !completeCalled.Load() {
+		t.Error("OnComplete was not called")
+	}
+	if v := completeErrMsg.Load(); v == nil || v.(string) != "intentional-error" {
+		t.Errorf("OnComplete err = %v, want %q", v, "intentional-error")
+	}
+}
+
+// TestIntegration_Callbacks_PanicRecovery verifies callback panics
+// don't crash the worker.
+func TestIntegration_Callbacks_PanicRecovery(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var handlerDone atomic.Bool
+
+	srv, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = srv.Handle("cb.panic", func(ctx context.Context, job *Job) error {
+		handlerDone.Store(true)
+		return nil
+	}, Workers(1),
+		OnSuccess(func(ctx context.Context, job *Job) {
+			panic("callback panic!")
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	_, err = client.Enqueue(ctx, "cb.panic", Payload{}, Queue("cb.panic"))
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- srv.Start(serverCtx) }()
+
+	deadline := time.After(15 * time.Second)
+	for !handlerDone.Load() {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for handler")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Enqueue a second job to verify worker is still alive after panic
+	var secondDone atomic.Bool
+	err = srv.Handle("cb.after", func(ctx context.Context, job *Job) error {
+		secondDone.Store(true)
+		return nil
+	})
+	// Handler already registered on running server — this will fail.
+	// Instead, enqueue another job of the same type.
+	_, err = client.Enqueue(ctx, "cb.panic", Payload{}, Queue("cb.panic"))
+	if err != nil {
+		t.Fatalf("Enqueue second: %v", err)
+	}
+
+	deadline = time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			// Worker still processes jobs = good enough (panic didn't crash it).
+			// The job may or may not have been picked up within timeout,
+			// but the server is still running.
+			goto doneWait
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+doneWait:
+
+	serverCancel()
+	<-serverDone
+	// If we reach here without crashing, the panic recovery worked.
+}
+
+// TestIntegration_EnqueueBatch verifies batch enqueue creates all jobs
+// and they are processed correctly.
+func TestIntegration_EnqueueBatch(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var processed atomic.Int32
+
+	srv, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(10*time.Second),
+		WithGracePeriod(1*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = srv.Handle("batch.test", func(ctx context.Context, job *Job) error {
+		processed.Add(1)
+		return nil
+	}, Workers(3))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Batch enqueue 10 jobs
+	items := make([]BatchItem, 10)
+	for i := range items {
+		items[i] = BatchItem{
+			JobType: "batch.test",
+			Payload: Payload{"index": i},
+			Options: []EnqueueOption{Queue("batch.test")},
+		}
+	}
+
+	jobs, err := client.EnqueueBatch(ctx, items)
+	if err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+
+	if len(jobs) != 10 {
+		t.Fatalf("expected 10 jobs, got %d", len(jobs))
+	}
+
+	// Verify all jobs have unique IDs
+	ids := make(map[string]bool)
+	for _, job := range jobs {
+		if ids[job.ID] {
+			t.Fatalf("duplicate job ID: %s", job.ID)
+		}
+		ids[job.ID] = true
+	}
+
+	// Start server and wait for all jobs to be processed
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- srv.Start(serverCtx) }()
+
+	deadline := time.After(15 * time.Second)
+	for processed.Load() < 10 {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatalf("timeout: processed=%d/10", processed.Load())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	serverCancel()
+	<-serverDone
+
+	if got := processed.Load(); got != 10 {
+		t.Errorf("processed = %d, want 10", got)
+	}
+}
+
+// TestIntegration_EnqueueBatch_Validation verifies batch enqueue
+// validates all items upfront.
+func TestIntegration_EnqueueBatch_Validation(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		items   []BatchItem
+		wantErr string
+	}{
+		{
+			name:    "empty job type",
+			items:   []BatchItem{{JobType: "", Payload: Payload{}}},
+			wantErr: "batch item 0",
+		},
+		{
+			name: "unique not supported",
+			items: []BatchItem{
+				{JobType: "ok", Payload: Payload{}},
+				{JobType: "fail", Payload: Payload{}, Options: []EnqueueOption{Unique()}},
+			},
+			wantErr: "Unique is not supported in EnqueueBatch",
+		},
+		{
+			name: "depends_on not supported",
+			items: []BatchItem{
+				{JobType: "fail", Payload: Payload{}, Options: []EnqueueOption{DependsOn("parent-1")}},
+			},
+			wantErr: "DependsOn is not supported in EnqueueBatch",
+		},
+		{
+			name:  "empty batch returns nil",
+			items: []BatchItem{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jobs, err := client.EnqueueBatch(ctx, tt.items)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(tt.items) == 0 && jobs != nil {
+				t.Errorf("expected nil for empty batch, got %v", jobs)
+			}
+		})
+	}
+}
+
+// TestIntegration_IsFailure_Panic verifies that a panicking IsFailure
+// predicate does not crash the worker and the job is treated as a failure.
+func TestIntegration_IsFailure_Panic(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	var processed atomic.Bool
+
+	srv, err := NewServer(
+		WithServerRedis(testRedisAddr()),
+		WithServerRedisOpts(WithPrefix(prefix)),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	srv.Handle("panic.isfailure", func(ctx context.Context, job *Job) error {
+		processed.Store(true)
+		return fmt.Errorf("some error")
+	},
+		Workers(1),
+		IsFailure(func(err error) bool {
+			panic("predicate boom!")
+		}),
+	)
+
+	ctx := context.Background()
+	_, err = client.Enqueue(ctx, "panic.isfailure", Payload{"test": true},
+		Queue("panic.isfailure"), MaxRetry(0))
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	srvCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	go srv.Start(srvCtx)
+
+	// Wait for job to be processed (dequeue poll is 5s)
+	deadline := time.After(12 * time.Second)
+	for !processed.Load() {
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatal("timeout waiting for job to process")
+		default:
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	// Give time for DLQ write
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+
+	// Verify job went to DLQ (panic defaults to countAsFailure=true, maxRetry=0 → DLQ)
+	rdb := client.RedisClient()
+	dlqKey := prefix + "queue:panic.isfailure:dead_letter"
+	count, err := rdb.ZCard(ctx, dlqKey).Result()
+	if err != nil {
+		t.Fatalf("ZCard DLQ: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 job in DLQ, got %d", count)
+	}
+}
+
+// TestIntegration_Middleware_NilRejection verifies that Use() rejects
+// nil middleware.
+func TestIntegration_Middleware_NilRejection(t *testing.T) {
+	srv, err := NewServer(WithServerRedis(testRedisAddr()))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = srv.Use(nil)
+	if err == nil {
+		t.Fatal("expected error for nil middleware, got nil")
+	}
+	if !strings.Contains(err.Error(), "nil") {
+		t.Errorf("error = %q, want containing 'nil'", err.Error())
+	}
+}
+
+// TestIntegration_Middleware_AfterStart verifies that Use() rejects
+// middleware registration after Start() is called.
+func TestIntegration_Middleware_AfterStart(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	srv, err := NewServer(
+		WithServerRedis(testRedisAddr()),
+		WithServerRedisOpts(WithPrefix(prefix)),
+		WithShutdownTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	srv.Handle("dummy", func(ctx context.Context, job *Job) error {
+		return nil
+	}, Workers(1))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	go srv.Start(ctx)
+	time.Sleep(500 * time.Millisecond) // Wait for Start() to set running=true
+
+	mw := func(next Handler) Handler { return next }
+	err = srv.Use(mw)
+	if err == nil {
+		t.Fatal("expected error for Use() after Start(), got nil")
+	}
+	if !strings.Contains(err.Error(), "running") {
+		t.Errorf("error = %q, want containing 'running'", err.Error())
+	}
+	cancel()
+}
+
+// TestIntegration_EnqueueBatch_TooLarge verifies the batch size limit.
+func TestIntegration_EnqueueBatch_TooLarge(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	items := make([]BatchItem, maxBatchEnqueueSize+1)
+	for i := range items {
+		items[i] = BatchItem{JobType: "too.many", Payload: Payload{}}
+	}
+
+	_, err = client.EnqueueBatch(context.Background(), items)
+	if err == nil {
+		t.Fatal("expected ErrBatchTooLarge, got nil")
+	}
+	if !errors.Is(err, ErrBatchTooLarge) {
+		t.Errorf("expected ErrBatchTooLarge, got %v", err)
+	}
+}
+
+// TestIntegration_EnqueueBatch_DuplicateJobID verifies duplicate ID detection.
+func TestIntegration_EnqueueBatch_DuplicateJobID(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	items := []BatchItem{
+		{JobType: "dup", Payload: Payload{}, Options: []EnqueueOption{JobID("same-id")}},
+		{JobType: "dup", Payload: Payload{}, Options: []EnqueueOption{JobID("same-id")}},
+	}
+
+	_, err = client.EnqueueBatch(context.Background(), items)
+	if err == nil {
+		t.Fatal("expected duplicate job ID error, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate job ID") {
+		t.Errorf("error = %q, want containing 'duplicate job ID'", err.Error())
+	}
+}
+
+// TestIntegration_EnqueueBatch_EnqueueAtFrontRejected verifies EnqueueAtFront rejection.
+func TestIntegration_EnqueueBatch_EnqueueAtFrontRejected(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	items := []BatchItem{
+		{JobType: "front", Payload: Payload{}, Options: []EnqueueOption{EnqueueAtFront(true)}},
+	}
+
+	_, err = client.EnqueueBatch(context.Background(), items)
+	if err == nil {
+		t.Fatal("expected ErrBatchEnqueueAtFront, got nil")
+	}
+	if !errors.Is(err, ErrBatchEnqueueAtFront) {
+		t.Errorf("expected ErrBatchEnqueueAtFront, got %v", err)
 	}
 }

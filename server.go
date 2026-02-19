@@ -181,9 +181,11 @@ type Server struct {
 	cfg      *serverConfig
 	rc       *RedisClient
 	scripts  *scriptRegistry
-	handlers map[string]Handler
-	pools    []*pool
-	logger   *slog.Logger
+	handlers       map[string]Handler
+	handlerConfigs map[string]*handlerConfig
+	middlewares    []MiddlewareFunc
+	pools          []*pool
+	logger         *slog.Logger
 
 	// jobTypePool tracks which pool each job type is assigned to.
 	// Key: job type, Value: pool name.
@@ -251,8 +253,9 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 		cfg:         cfg,
 		rc:          rc,
 		scripts:     sr,
-		handlers:    make(map[string]Handler),
-		jobTypePool: make(map[string]string),
+		handlers:       make(map[string]Handler),
+		handlerConfigs: make(map[string]*handlerConfig),
+		jobTypePool:    make(map[string]string),
 		poolNames:   make(map[string]bool),
 		cronEntries: make(map[string]*CronEntry),
 		logger:      cfg.logger,
@@ -310,6 +313,7 @@ func (s *Server) Handle(jobType string, handler Handler, opts ...HandleOption) e
 	}
 
 	s.handlers[jobType] = handler
+	s.handlerConfigs[jobType] = hcfg
 
 	if hcfg.workers > 0 {
 		// Check for conflict: job type already assigned to another pool
@@ -327,6 +331,29 @@ func (s *Server) Handle(jobType string, handler Handler, opts ...HandleOption) e
 		s.poolNames[jobType] = true
 	}
 
+	return nil
+}
+
+// Use registers middleware that wraps all handlers. Middleware is applied
+// in the order registered: Use(a, b) executes as a → b → handler.
+//
+// Must be called before Start(). Middleware is applied to handlers once
+// at startup, so Use() and Handle() can be called in any order.
+func (s *Server) Use(mws ...MiddlewareFunc) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.running {
+		return fmt.Errorf("cannot register middleware while server is running")
+	}
+
+	for i, mw := range mws {
+		if mw == nil {
+			return fmt.Errorf("middleware at index %d is nil", i)
+		}
+	}
+
+	s.middlewares = append(s.middlewares, mws...)
 	return nil
 }
 
@@ -419,6 +446,20 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Ensure a default pool exists for handlers without Workers()
 	s.ensureDefaultPool()
+
+	// Apply middleware chain to all handlers (once).
+	// Wrap in reverse order so Use(a, b) executes as a → b → handler.
+	// Clear middlewares after application to prevent double-wrapping.
+	if len(s.middlewares) > 0 {
+		for jobType, handler := range s.handlers {
+			wrapped := handler
+			for i := len(s.middlewares) - 1; i >= 0; i-- {
+				wrapped = s.middlewares[i](wrapped)
+			}
+			s.handlers[jobType] = wrapped
+		}
+		s.middlewares = nil
+	}
 
 	// Save cron entries to Redis
 	if err := s.saveCronEntries(ctx); err != nil {

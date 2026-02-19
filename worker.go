@@ -287,7 +287,7 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 		p.logger.Error("failed to fetch job", "job_id", jobID, "error", err)
 		// Use the dequeue source queue so ZREM targets the correct processing set.
 		failedJob := &Job{ID: jobID, Queue: queue}
-		p.handleFailure(ctx, failedJob, "failed to fetch job data", 0)
+		p.handleFailure(ctx, failedJob, "failed to fetch job data", nil)
 		return
 	}
 
@@ -298,7 +298,7 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 		if q, ok := result["queue"]; ok && q != "" {
 			failedJob.Queue = q
 		}
-		p.handleFailure(ctx, failedJob, "failed to parse job data: "+err.Error(), 0)
+		p.handleFailure(ctx, failedJob, "failed to parse job data: "+err.Error(), nil)
 		return
 	}
 
@@ -306,7 +306,7 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 	handler, ok := p.server.handlers[job.Type]
 	if !ok {
 		p.logger.Error("no handler for job type", "job_id", jobID, "type", job.Type)
-		p.handleFailure(ctx, job, "no handler registered for job type: "+job.Type, 0)
+		p.handleFailure(ctx, job, "no handler registered for job type: "+job.Type, nil)
 		return
 	}
 
@@ -358,13 +358,15 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 				"error", handlerErr,
 				"duration", elapsed,
 			)
-			p.handleFailure(ctx, job, handlerErr.Error(), elapsed)
+			p.fireCallbacks(ctx, job, handlerErr)
+			p.handleFailure(ctx, job, handlerErr.Error(), handlerErr)
 		} else {
 			p.logger.Info("job completed",
 				"job_id", jobID,
 				"type", job.Type,
 				"duration", elapsed,
 			)
+			p.fireCallbacks(ctx, job, nil)
 			p.completeJob(ctx, job, elapsed)
 		}
 
@@ -390,15 +392,18 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 			graceTimer.Stop()
 			elapsed = time.Since(startTime)
 			if handlerErr != nil {
-				p.handleFailure(ctx, job, "timeout exceeded, handler stopped: "+handlerErr.Error(), elapsed)
+				p.fireCallbacks(ctx, job, handlerErr)
+				p.handleFailure(ctx, job, "timeout exceeded, handler stopped: "+handlerErr.Error(), handlerErr)
 			} else {
 				// Handler completed during grace period
+				p.fireCallbacks(ctx, job, nil)
 				p.completeJob(ctx, job, elapsed)
 			}
 		case <-graceTimer.C:
 			// Handler still stuck — abandon
 			elapsed = time.Since(startTime)
 			total := p.abandonedHandlers.Add(1)
+			timeoutErr := fmt.Errorf("timeout exceeded, handler abandoned after %v", elapsed)
 			if total >= maxAbandonedHandlers {
 				p.logger.Error("CRITICAL: abandoned handler limit reached, pool may be leaking goroutines",
 					"job_id", jobID,
@@ -413,13 +418,64 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 					"abandoned_total", total,
 				)
 			}
-			p.handleFailure(ctx, job, "timeout exceeded, handler abandoned", elapsed)
+			p.fireCallbacks(ctx, job, timeoutErr)
+			p.handleFailure(ctx, job, "timeout exceeded, handler abandoned", nil)
 			// Drain resultCh in background to decrement counter when handler finishes.
 			go func() {
 				<-resultCh
 				p.abandonedHandlers.Add(-1)
 			}()
 		}
+	}
+}
+
+// fireCallbacks invokes the registered OnSuccess/OnFailure/OnComplete
+// callbacks for the given job type. Each callback is wrapped in a
+// deferred panic recovery so a misbehaving callback never crashes
+// the worker.
+func (p *pool) fireCallbacks(ctx context.Context, job *Job, handlerErr error) {
+	hcfg, ok := p.server.handlerConfigs[job.Type]
+	if !ok {
+		return
+	}
+
+	if handlerErr == nil && hcfg.onSuccess != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.logger.Error("OnSuccess callback panic",
+						"job_id", job.ID, "type", job.Type, "panic", r,
+						"stack", string(debug.Stack()))
+				}
+			}()
+			hcfg.onSuccess(ctx, job)
+		}()
+	}
+
+	if handlerErr != nil && hcfg.onFailure != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.logger.Error("OnFailure callback panic",
+						"job_id", job.ID, "type", job.Type, "panic", r,
+						"stack", string(debug.Stack()))
+				}
+			}()
+			hcfg.onFailure(ctx, job, handlerErr)
+		}()
+	}
+
+	if hcfg.onComplete != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.logger.Error("OnComplete callback panic",
+						"job_id", job.ID, "type", job.Type, "panic", r,
+						"stack", string(debug.Stack()))
+				}
+			}()
+			hcfg.onComplete(ctx, job, handlerErr)
+		}()
 	}
 }
 
@@ -474,14 +530,62 @@ func (p *pool) completeJob(ctx context.Context, job *Job, elapsed time.Duration)
 
 // handleFailure evaluates retry policy and either retries or moves to DLQ.
 // Max retry is resolved: job-level > pool-level > 0 (no retry).
-func (p *pool) handleFailure(ctx context.Context, job *Job, errMsg string, _ time.Duration) {
+//
+// handlerErr is the original error returned by the handler (nil for internal
+// errors like fetch/parse failures). It is used to check ErrSkipRetry and
+// the IsFailure predicate.
+func (p *pool) handleFailure(ctx context.Context, job *Job, errMsg string, handlerErr error) {
+	// ErrSkipRetry: bypass all retry logic, go straight to DLQ.
+	if handlerErr != nil && errors.Is(handlerErr, ErrSkipRetry) {
+		p.logger.Info("job skip retry requested",
+			"job_id", job.ID,
+			"type", job.Type,
+			"error", errMsg,
+		)
+		p.deadLetterJob(ctx, job, errMsg)
+		return
+	}
+
+	// IsFailure predicate: if set and returns false, retry without
+	// incrementing the retry counter (transient/non-failure error).
+	countAsFailure := true
+	if handlerErr != nil {
+		if hcfg, ok := p.server.handlerConfigs[job.Type]; ok && hcfg.isFailure != nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						p.logger.Error("IsFailure predicate panic, treating as failure",
+							"job_id", job.ID, "type", job.Type, "panic", r,
+							"stack", string(debug.Stack()),
+						)
+						countAsFailure = true
+					}
+				}()
+				countAsFailure = hcfg.isFailure(handlerErr)
+			}()
+		}
+	}
+
 	newRetryCount := job.RetryCount + 1
 	maxRetry := p.resolveMaxRetry(job)
 
-	if maxRetry > 0 && newRetryCount <= maxRetry {
-		p.retryJob(ctx, job, errMsg, newRetryCount)
+	if countAsFailure {
+		if maxRetry > 0 && newRetryCount <= maxRetry {
+			p.retryJob(ctx, job, errMsg, newRetryCount)
+		} else {
+			p.deadLetterJob(ctx, job, errMsg)
+		}
 	} else {
-		p.deadLetterJob(ctx, job, errMsg)
+		// Non-failure: retry without incrementing counter.
+		// Still requires retry to be configured (maxRetry > 0).
+		if maxRetry > 0 {
+			p.retryJob(ctx, job, errMsg, job.RetryCount)
+		} else {
+			p.logger.Warn("non-failure error sent to DLQ because maxRetry=0",
+				"job_id", job.ID, "type", job.Type, "error", errMsg,
+			)
+			p.deadLetterJob(ctx, job, errMsg)
+		}
 	}
 }
 
@@ -571,6 +675,7 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 		"type", job.Type,
 		"retry_count", job.RetryCount,
 		"max_retry", job.MaxRetry,
+		"error", errMsg,
 	)
 
 	// DAG: propagate failure to dependents.
@@ -591,7 +696,9 @@ func (p *pool) retryDelay(job *Job, retryCount int) time.Duration {
 	// Job-level intervals (highest priority)
 	if len(job.RetryIntervals) > 0 {
 		idx := retryCount - 1
-		if idx >= len(job.RetryIntervals) {
+		if idx < 0 {
+			idx = 0
+		} else if idx >= len(job.RetryIntervals) {
 			idx = len(job.RetryIntervals) - 1
 		}
 		return time.Duration(job.RetryIntervals[idx]) * time.Second
@@ -628,7 +735,9 @@ func (p *pool) poolRetryDelay(rp *RetryPolicy, retryCount int) time.Duration {
 	case BackoffCustom:
 		if len(rp.Intervals) > 0 {
 			idx := retryCount - 1
-			if idx >= len(rp.Intervals) {
+			if idx < 0 {
+				idx = 0
+			} else if idx >= len(rp.Intervals) {
 				idx = len(rp.Intervals) - 1
 			}
 			return time.Duration(rp.Intervals[idx]) * time.Second
