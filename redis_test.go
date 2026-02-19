@@ -106,3 +106,20 @@ func TestNewRedisClient_WithOptions(t *testing.T) {
 		t.Errorf("prefix = %q, want %q", rc.prefix, "custom:")
 	}
 }
+
+func TestNewRedisClient_WithTLS(t *testing.T) {
+	rc, err := NewRedisClient(
+		WithRedisAddr("localhost:6380"),
+		WithRedisTLS(nil),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer rc.Close()
+
+	// Verify TLS is configured on the underlying client
+	opts := rc.Unwrap().Options()
+	if opts.TLSConfig == nil {
+		t.Error("TLSConfig should not be nil when WithRedisTLS is used")
+	}
+}

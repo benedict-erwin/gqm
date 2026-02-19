@@ -57,6 +57,7 @@ type serverConfig struct {
 	authSessionTTL int        // seconds, default 86400
 	authUsers      []AuthUser // loaded from config
 	apiKeys        []AuthAPIKey
+	apiRateLimit   int // requests/second per IP; 0 = default (100), -1 = disabled
 }
 
 // WithServerRedis sets the Redis address for the server.
@@ -268,6 +269,7 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 			DashEnabled:    cfg.dashEnabled,
 			DashPathPrefix: cfg.dashPathPrefix,
 			DashCustomDir:  cfg.dashCustomDir,
+			RateLimit:      cfg.apiRateLimit,
 		}
 		for _, u := range cfg.authUsers {
 			monCfg.AuthUsers = append(monCfg.AuthUsers, monitor.AuthUser{

@@ -3,6 +3,7 @@ package gqm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // maxDependencyDepth is the maximum depth for cycle detection traversal.
@@ -118,12 +119,18 @@ func resolveDependents(ctx context.Context, rc *RedisClient, scripts *scriptRegi
 			promoted = append(promoted, depID)
 			// Clean up DAG metadata keys now that the job is promoted.
 			depsKey := rc.Key("job", depID, "deps")
-			rc.rdb.Del(ctx, depsKey, pendingDepsKey)
+			if err := rc.rdb.Del(ctx, depsKey, pendingDepsKey).Err(); err != nil && ctx.Err() == nil {
+				slog.Warn("failed to clean up DAG metadata for promoted job",
+					"job_id", depID, "error", err)
+			}
 		}
 	}
 
 	// Clean up parent's dependents set after all resolutions.
-	rc.rdb.Del(ctx, dependentsKey)
+	if err := rc.rdb.Del(ctx, dependentsKey).Err(); err != nil && ctx.Err() == nil {
+		slog.Warn("failed to clean up parent dependents set",
+			"parent_job_id", parentJobID, "error", err)
+	}
 
 	return promoted, nil
 }
@@ -259,7 +266,10 @@ func cancelDependentsRecursive(ctx context.Context, rc *RedisClient, scripts *sc
 			}
 			// Clean up DAG metadata for the resolved dependent.
 			depDepsKey := rc.Key("job", depID, "deps")
-			rc.rdb.Del(ctx, depDepsKey, depPendingKey)
+			if err := rc.rdb.Del(ctx, depDepsKey, depPendingKey).Err(); err != nil && ctx.Err() == nil {
+				slog.Warn("failed to clean up DAG metadata for allow_failure dependent",
+					"job_id", depID, "error", err)
+			}
 		} else {
 			// Recursive cascade cancel.
 			if err := cancelDependentsRecursive(ctx, rc, scripts, depID, depth+1); err != nil {
@@ -270,7 +280,10 @@ func cancelDependentsRecursive(ctx context.Context, rc *RedisClient, scripts *sc
 
 	// Clean up this job's DAG metadata keys.
 	depsKey := rc.Key("job", jobID, "deps")
-	rc.rdb.Del(ctx, depsKey, dependentsKey)
+	if err := rc.rdb.Del(ctx, depsKey, dependentsKey).Err(); err != nil && ctx.Err() == nil {
+		slog.Warn("failed to clean up DAG metadata for canceled job",
+			"job_id", jobID, "error", err)
+	}
 
 	return nil
 }

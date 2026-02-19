@@ -1113,7 +1113,7 @@ monitoring:
     enabled: true
     api_keys:
       - name: ""
-        key: "gqm_ak_test"
+        key: "gqm_ak_test_0123456789abcdefghijkl"
 `
 	_, err := LoadConfig([]byte(yaml))
 	if err == nil || !strings.Contains(err.Error(), "name must not be empty") {
@@ -1161,7 +1161,7 @@ monitoring:
     enabled: true
     api_keys:
       - name: "test-key"
-        key: "gqm_ak_test"
+        key: "gqm_ak_test_0123456789abcdefghijkl"
         role: "root"
 `
 	_, err := LoadConfig([]byte(yaml))
@@ -1188,13 +1188,13 @@ monitoring:
     enabled: true
     api_keys:
       - name: admin-key
-        key: gqm_ak_admin
+        key: gqm_ak_admin_0123456789abcdefghij
         role: admin
       - name: viewer-key
-        key: gqm_ak_viewer
+        key: gqm_ak_viewer_0123456789abcdefghi
         role: viewer
       - name: default-key
-        key: gqm_ak_default
+        key: gqm_ak_default_0123456789abcdefgh
 `
 	_, err := LoadConfig([]byte(yaml))
 	if err != nil {
@@ -1278,6 +1278,38 @@ monitoring:
 	}
 }
 
+func TestValidate_MonitoringPasswordHashNotBcrypt(t *testing.T) {
+	yaml := `
+monitoring:
+  auth:
+    enabled: true
+    users:
+      - username: admin
+        password_hash: "plaintext_password"
+  api:
+    enabled: true
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "bcrypt hash") {
+		t.Errorf("expected bcrypt hash error, got %v", err)
+	}
+}
+
+func TestValidate_MonitoringAPIKeyTooShort(t *testing.T) {
+	yaml := `
+monitoring:
+  api:
+    enabled: true
+    api_keys:
+      - name: "short-key"
+        key: "too_short"
+`
+	_, err := LoadConfig([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "at least") {
+		t.Errorf("expected min length error, got %v", err)
+	}
+}
+
 func TestLoadConfig_ValidFullWithMonitoring(t *testing.T) {
 	yaml := `
 monitoring:
@@ -1292,7 +1324,7 @@ monitoring:
     addr: ":9090"
     api_keys:
       - name: tui-key
-        key: gqm_ak_testkey123
+        key: gqm_ak_testkey123_0123456789abcdef
   dashboard:
     enabled: true
     path_prefix: "/ui"
@@ -1325,7 +1357,7 @@ monitoring:
 	if len(cfg.Monitoring.API.APIKeys) != 1 {
 		t.Fatalf("api.api_keys len = %d", len(cfg.Monitoring.API.APIKeys))
 	}
-	if cfg.Monitoring.API.APIKeys[0].Key != "gqm_ak_testkey123" {
+	if cfg.Monitoring.API.APIKeys[0].Key != "gqm_ak_testkey123_0123456789abcdef" {
 		t.Errorf("api.api_keys[0].key = %q", cfg.Monitoring.API.APIKeys[0].Key)
 	}
 

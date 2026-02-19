@@ -69,6 +69,15 @@ GQM.app = {
         if (GQM.pages.login) {
             GQM.pages.login.render(container);
         }
+        // Show session expiry message if set
+        if (GQM.app.loginMessage) {
+            var errorEl = document.getElementById('login-error');
+            if (errorEl) {
+                errorEl.textContent = GQM.app.loginMessage;
+                errorEl.style.display = '';
+            }
+            GQM.app.loginMessage = null;
+        }
     },
 
     // Called after successful login.

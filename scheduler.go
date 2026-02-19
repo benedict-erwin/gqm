@@ -12,7 +12,7 @@ import (
 const (
 	defaultSchedulerPollInterval = 1 * time.Second
 	schedulerBatchSize           = 100
-	cronLockTTL                  = 60 * time.Second
+	cronLockTTL                  = 30 * time.Second
 )
 
 // schedulerEngine handles both the scheduled job polling (retry + delayed jobs)
@@ -127,6 +127,8 @@ func (se *schedulerEngine) evalCron(ctx context.Context, now time.Time) {
 			next := entry.expr.Next(now.In(loc))
 			if next.IsZero() {
 				entry.NextRun = -1
+				se.logger.Warn("cron entry has no valid next run, skipping permanently",
+					"entry_id", entry.ID, "cron_expr", entry.CronExpr)
 				continue
 			}
 			entry.NextRun = next.Unix()
@@ -306,7 +308,9 @@ func (se *schedulerEngine) enqueueCronJob(ctx context.Context, entry *CronEntry,
 	jobMap, err := job.ToMap()
 	if err != nil {
 		se.logger.Error("converting cron job to map", "entry_id", entry.ID, "error", err)
-		entry.LastStatus = "error"
+		// Non-transient error (serialization bug). Advance schedule so the
+		// entry doesn't retry the same broken fire every tick.
+		se.advanceCronSchedule(ctx, entry, now, "error")
 		return
 	}
 
@@ -327,7 +331,9 @@ func (se *schedulerEngine) enqueueCronJob(ctx context.Context, entry *CronEntry,
 		if ctx.Err() == nil {
 			se.logger.Error("enqueuing cron job", "entry_id", entry.ID, "error", err)
 		}
-		entry.LastStatus = "error"
+		// Do NOT set LastStatus="error" for transient Redis errors.
+		// The entry retains its previous status so the next tick can retry.
+		// advanceCronSchedule is not called, so NextRun stays the same.
 		return
 	}
 
@@ -343,15 +349,19 @@ func (se *schedulerEngine) enqueueCronJob(ctx context.Context, entry *CronEntry,
 // advanceCronSchedule updates the entry's next_run, last_run, and last_status,
 // then persists to Redis. Used after both successful enqueue and skip.
 func (se *schedulerEngine) advanceCronSchedule(ctx context.Context, entry *CronEntry, now time.Time, status string) {
-	entry.LastRun = now.Unix()
-	entry.LastStatus = status
-
 	loc := se.resolveLocation(entry)
 	next := entry.expr.Next(now.In(loc))
+
+	// Protect field mutations under cronMu to avoid data race with
+	// setCronEnabled, which writes Enabled/UpdatedAt from HTTP handlers.
+	se.server.cronMu.Lock()
+	entry.LastRun = now.Unix()
+	entry.LastStatus = status
 	if !next.IsZero() {
 		entry.NextRun = next.Unix()
 	}
 	entry.UpdatedAt = now.Unix()
+	se.server.cronMu.Unlock()
 
 	se.updateCronEntryState(ctx, entry)
 }

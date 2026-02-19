@@ -2,6 +2,7 @@ package gqm
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	"github.com/redis/go-redis/v9"
@@ -11,10 +12,11 @@ const defaultPrefix = "gqm:"
 
 // RedisConfig holds Redis connection configuration.
 type RedisConfig struct {
-	Addr     string
-	Password string
-	DB       int
-	Prefix   string
+	Addr      string
+	Password  string
+	DB        int
+	Prefix    string
+	TLSConfig *tls.Config
 }
 
 // RedisClient wraps a go-redis client with GQM-specific helpers.
@@ -34,9 +36,10 @@ func NewRedisClient(opts ...RedisOption) (*RedisClient, error) {
 	}
 
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.Addr,
-		Password: cfg.Password,
-		DB:       cfg.DB,
+		Addr:      cfg.Addr,
+		Password:  cfg.Password,
+		DB:        cfg.DB,
+		TLSConfig: cfg.TLSConfig,
 	})
 
 	return &RedisClient{rdb: rdb, prefix: cfg.Prefix}, nil
@@ -98,4 +101,16 @@ func WithRedisDB(db int) RedisOption {
 // WithPrefix sets the key prefix for all GQM keys.
 func WithPrefix(prefix string) RedisOption {
 	return func(cfg *RedisConfig) { cfg.Prefix = prefix }
+}
+
+// WithRedisTLS enables TLS for the Redis connection. Pass nil for default TLS
+// configuration (system CA pool), or provide a custom *tls.Config for
+// client certificates, custom CA, or other TLS settings.
+func WithRedisTLS(tc *tls.Config) RedisOption {
+	return func(cfg *RedisConfig) {
+		if tc == nil {
+			tc = &tls.Config{} //nolint:gosec // empty = system CA pool
+		}
+		cfg.TLSConfig = tc
+	}
 }

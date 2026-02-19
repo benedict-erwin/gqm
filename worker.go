@@ -239,10 +239,9 @@ func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, erro
 	jobPrefix := rc.Key("job") + ":"
 
 	now := time.Now().Unix()
-	// Note: uses globalTimeout for the processing set deadline (stuck job detection).
-	// The actual job timeout is resolved later in processJob, but the job data isn't
-	// available at dequeue time. This means stuck job detection may take up to
-	// globalTimeout even for jobs with shorter timeouts.
+	// Uses globalTimeout as a conservative initial deadline for the processing set.
+	// The actual job timeout is resolved after fetching job data in processJob,
+	// which then updates the score via ZAddXX if the resolved timeout is shorter.
 	timeout := int64(p.server.cfg.globalTimeout.Seconds())
 
 	result := p.server.scripts.run(ctx, rc.rdb, "dequeue",
@@ -313,6 +312,18 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 
 	// Resolve timeout and create context
 	timeout := p.server.resolveTimeout(job, p.cfg)
+
+	// Update the processing set deadline with the resolved timeout.
+	// At dequeue time we used globalTimeout as a conservative default
+	// because the job data wasn't available yet. Now that we know the
+	// actual timeout, update the score so stuck job detection fires at
+	// the correct time.
+	if timeout < p.server.cfg.globalTimeout {
+		processingKey := rc.Key("queue", job.Queue, "processing")
+		newDeadline := float64(time.Now().Unix()) + timeout.Seconds()
+		rc.rdb.ZAddXX(ctx, processingKey, redis.Z{Score: newDeadline, Member: job.ID})
+	}
+
 	jobCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

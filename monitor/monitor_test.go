@@ -224,11 +224,11 @@ func TestAuth_APIKeyAuth(t *testing.T) {
 		AuthEnabled:    true,
 		AuthSessionTTL: 3600,
 		AuthUsers:      []AuthUser{{Username: "admin", PasswordHash: "$2a$10$x"}},
-		APIKeys:        []AuthAPIKey{{Name: "test", Key: "gqm_ak_test123"}},
+		APIKeys:        []AuthAPIKey{{Name: "test", Key: "gqm_ak_test123_0123456789abcdefgh"}},
 	})
 	m.startedAt = time.Now()
 
-	w := doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_test123")
+	w := doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_test123_0123456789abcdefgh")
 	// Should not be 401 (might be 200 with empty queues)
 	if w.Code == http.StatusUnauthorized {
 		t.Fatalf("status = 401, API key should be accepted")
@@ -240,11 +240,11 @@ func TestAuth_APIKeyInvalid(t *testing.T) {
 		AuthEnabled:    true,
 		AuthSessionTTL: 3600,
 		AuthUsers:      []AuthUser{{Username: "admin", PasswordHash: "$2a$10$x"}},
-		APIKeys:        []AuthAPIKey{{Name: "test", Key: "gqm_ak_valid"}},
+		APIKeys:        []AuthAPIKey{{Name: "test", Key: "gqm_ak_valid_0123456789abcdefghijk"}},
 	})
 	m.startedAt = time.Now()
 
-	w := doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_invalid")
+	w := doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_invalid_0123456789abcdefghi")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 for invalid API key", w.Code)
 	}
@@ -337,12 +337,12 @@ func TestAuth_Logout(t *testing.T) {
 func TestAuth_Me(t *testing.T) {
 	m, _ := testMonitor(t, Config{
 		AuthEnabled: true,
-		APIKeys:     []AuthAPIKey{{Name: "mykey", Key: "gqm_ak_me"}},
+		APIKeys:     []AuthAPIKey{{Name: "mykey", Key: "gqm_ak_me_0123456789abcdefghijklmn"}},
 		AuthUsers:   []AuthUser{{Username: "x", PasswordHash: "$2a$10$x"}},
 	})
 	m.startedAt = time.Now()
 
-	w := doRequestWithAPIKey(m, "GET", "/auth/me", "gqm_ak_me")
+	w := doRequestWithAPIKey(m, "GET", "/auth/me", "gqm_ak_me_0123456789abcdefghijklmn")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
@@ -1618,26 +1618,26 @@ func TestSecurity_APIKeyConstantTimeComparison(t *testing.T) {
 	m, _ := testMonitor(t, Config{
 		AuthEnabled: true,
 		APIKeys: []AuthAPIKey{
-			{Name: "key1", Key: "gqm_ak_first"},
-			{Name: "key2", Key: "gqm_ak_second"},
+			{Name: "key1", Key: "gqm_ak_first_0123456789abcdefghijk"},
+			{Name: "key2", Key: "gqm_ak_second_0123456789abcdefghij"},
 		},
 		AuthUsers: []AuthUser{{Username: "x", PasswordHash: "$2a$10$x"}},
 	})
 	m.startedAt = time.Now()
 
 	// Valid key should work
-	w := doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_first")
+	w := doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_first_0123456789abcdefghijk")
 	if w.Code == http.StatusUnauthorized {
 		t.Fatal("valid API key rejected")
 	}
 
-	w = doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_second")
+	w = doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_second_0123456789abcdefghij")
 	if w.Code == http.StatusUnauthorized {
 		t.Fatal("second valid API key rejected")
 	}
 
 	// Invalid key should fail
-	w = doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_invalid")
+	w = doRequestWithAPIKey(m, "GET", "/api/v1/queues", "gqm_ak_invalid_0123456789abcdefghi")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid API key: status = %d, want 401", w.Code)
 	}
@@ -1910,7 +1910,7 @@ func TestSecurity_RBAC_ViewerCannotWrite(t *testing.T) {
 			{Username: "viewer", PasswordHash: "", Role: "viewer"},
 		},
 		APIKeys: []AuthAPIKey{
-			{Name: "viewer-key", Key: "gqm_ak_viewer", Role: "viewer"},
+			{Name: "viewer-key", Key: "gqm_ak_viewer_0123456789abcdefghij", Role: "viewer"},
 		},
 	})
 	m.startedAt = time.Now()
@@ -2003,21 +2003,21 @@ func TestSecurity_RBAC_APIKeyViewerBlocked(t *testing.T) {
 	m, _ := testMonitor(t, Config{
 		AuthEnabled: true,
 		APIKeys: []AuthAPIKey{
-			{Name: "viewer-key", Key: "gqm_ak_viewer", Role: "viewer"},
-			{Name: "admin-key", Key: "gqm_ak_admin", Role: "admin"},
+			{Name: "viewer-key", Key: "gqm_ak_viewer_0123456789abcdefghij", Role: "viewer"},
+			{Name: "admin-key", Key: "gqm_ak_admin_0123456789abcdefghijk", Role: "admin"},
 		},
 		AuthUsers: []AuthUser{{Username: "x", PasswordHash: "$2a$10$x"}},
 	})
 	m.startedAt = time.Now()
 
 	// Viewer API key should be blocked from write endpoints
-	w := doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_viewer")
+	w := doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_viewer_0123456789abcdefghij")
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("viewer API key write: status = %d, want 403", w.Code)
 	}
 
 	// Admin API key should not be blocked
-	w = doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_admin")
+	w = doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_admin_0123456789abcdefghijk")
 	if w.Code == http.StatusForbidden {
 		t.Fatal("admin API key blocked from write endpoint")
 	}
@@ -2338,13 +2338,13 @@ func TestSecurity_CSRF_CookieAuthRequiresCSRFHeader(t *testing.T) {
 func TestSecurity_CSRF_APIKeyExempt(t *testing.T) {
 	m, _ := testMonitorWithAdmin(t, Config{
 		AuthEnabled: true,
-		APIKeys:     []AuthAPIKey{{Name: "admin-key", Key: "gqm_ak_admin", Role: "admin"}},
+		APIKeys:     []AuthAPIKey{{Name: "admin-key", Key: "gqm_ak_admin_0123456789abcdefghijk", Role: "admin"}},
 		AuthUsers:   []AuthUser{{Username: "x", PasswordHash: "$2a$10$x"}},
 	}, &mockAdmin{})
 	m.startedAt = time.Now()
 
 	// API key auth should NOT require CSRF header
-	w := doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_admin")
+	w := doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_admin_0123456789abcdefghijk")
 	if w.Code == http.StatusForbidden {
 		t.Fatalf("API key write: status = 403, API keys should be exempt from CSRF")
 	}
@@ -2754,5 +2754,110 @@ func TestDAG_GraphInvalidID(t *testing.T) {
 	w := doRequest(m, "GET", "/api/v1/dag/graph/invalid%20id", "")
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// --- Rate limiting tests ---
+
+// doFullRequest routes through the full handler chain (including rate limiter).
+// Unlike doRequest which goes to m.mux directly, this uses m.server.Handler.
+func doFullRequest(m *Monitor, method, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	w := httptest.NewRecorder()
+	m.server.Handler.ServeHTTP(w, req)
+	return w
+}
+
+func TestRateLimit_Enabled(t *testing.T) {
+	m, _ := testMonitor(t, Config{RateLimit: 5}) // 5 req/s, burst = 10
+	m.startedAt = time.Now()
+
+	// First 10 requests should succeed (burst)
+	for i := 0; i < 10; i++ {
+		w := doFullRequest(m, "GET", "/api/v1/queues")
+		if w.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d should not be rate limited (within burst)", i)
+		}
+	}
+
+	// Next requests should be rate limited
+	limited := false
+	for i := 0; i < 20; i++ {
+		w := doFullRequest(m, "GET", "/api/v1/queues")
+		if w.Code == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Error("expected rate limiting to kick in after burst exhaustion")
+	}
+}
+
+func TestRateLimit_HealthExempt(t *testing.T) {
+	m, _ := testMonitor(t, Config{RateLimit: 1}) // 1 req/s, burst = 2
+	m.startedAt = time.Now()
+
+	// Exhaust rate limit
+	for i := 0; i < 10; i++ {
+		doFullRequest(m, "GET", "/api/v1/queues")
+	}
+
+	// Health endpoint should still work
+	w := doFullRequest(m, "GET", "/health")
+	if w.Code == http.StatusTooManyRequests {
+		t.Error("health endpoint should be exempt from rate limiting")
+	}
+}
+
+func TestRateLimit_Disabled(t *testing.T) {
+	m, _ := testMonitor(t, Config{RateLimit: -1}) // disabled
+	m.startedAt = time.Now()
+
+	// Many rapid requests should all succeed
+	for i := 0; i < 100; i++ {
+		w := doFullRequest(m, "GET", "/api/v1/queues")
+		if w.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d rate limited, but rate limiting should be disabled", i)
+		}
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	m, _ := testMonitor(t, Config{RateLimit: -1})
+	m.startedAt = time.Now()
+
+	w := doFullRequest(m, "GET", "/health")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /health: status = %d, want 200", w.Code)
+	}
+
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing")
+	}
+	if !strings.Contains(csp, "default-src 'self'") {
+		t.Fatalf("CSP = %q, want to contain default-src 'self'", csp)
+	}
+
+	xcto := w.Header().Get("X-Content-Type-Options")
+	if xcto != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", xcto)
+	}
+
+	xfo := w.Header().Get("X-Frame-Options")
+	if xfo != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want DENY", xfo)
+	}
+}
+
+func TestPagination_MaxPageCap(t *testing.T) {
+	req := httptest.NewRequest("GET", "/test?page=99999&limit=10", nil)
+	page, limit := pagination(req)
+	if page != 10000 {
+		t.Fatalf("page = %d, want 10000 (capped)", page)
+	}
+	if limit != 10 {
+		t.Fatalf("limit = %d, want 10", limit)
 	}
 }

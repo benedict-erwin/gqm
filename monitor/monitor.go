@@ -20,6 +20,7 @@ type Config struct {
 	DashEnabled    bool
 	DashPathPrefix string
 	DashCustomDir  string
+	RateLimit      int // requests/second per IP; 0 = default (100), -1 = disabled
 }
 
 // AuthUser represents a user credential.
@@ -64,6 +65,7 @@ type Monitor struct {
 	cfg       Config
 	admin     ServerAdmin
 	startedAt time.Time
+	limiter   *rateLimiter // nil if rate limiting is disabled
 }
 
 // New creates a new Monitor.
@@ -81,17 +83,26 @@ func New(rdb *redis.Client, prefix string, logger *slog.Logger, cfg Config, admi
 	m.mux = http.NewServeMux()
 	m.setupRoutes()
 
+	// Rate limiting: enabled by default (cfg.RateLimit == 0 means use default).
+	// Set cfg.RateLimit to -1 to disable.
+	var handler http.Handler = m.mux
+	if cfg.RateLimit != -1 {
+		m.limiter = newRateLimiter(cfg.RateLimit)
+		handler = m.limiter.middleware(handler)
+	}
+
 	addr := cfg.APIAddr
 	if addr == "" {
 		addr = ":8080"
 	}
 
 	m.server = &http.Server{
-		Addr:         addr,
-		Handler:      m.requestLogger(m.mux),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:           addr,
+		Handler:        m.securityHeaders(m.requestLogger(handler)),
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MB
 	}
 
 	return m
@@ -115,6 +126,9 @@ func (m *Monitor) Start() error {
 // Stop gracefully shuts down the HTTP server.
 func (m *Monitor) Stop(ctx context.Context) error {
 	m.logger.Info("monitor HTTP server stopping")
+	if m.limiter != nil {
+		m.limiter.close()
+	}
 	return m.server.Shutdown(ctx)
 }
 
@@ -131,6 +145,16 @@ func (m *Monitor) requestLogger(next http.Handler) http.Handler {
 			"duration", time.Since(start).String(),
 			"remote", r.RemoteAddr,
 		)
+	})
+}
+
+// securityHeaders adds standard security headers to all responses.
+func (m *Monitor) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
 	})
 }
 

@@ -1,6 +1,7 @@
 package gqm
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -26,6 +27,7 @@ type RedisYAML struct {
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
 	Prefix   string `yaml:"prefix"`
+	TLS      bool   `yaml:"tls"` // enable TLS with system CA pool
 }
 
 // AppConfig holds application-level settings from YAML.
@@ -110,17 +112,20 @@ type UserYAML struct {
 
 // APIConfig holds HTTP API settings from YAML.
 type APIConfig struct {
-	Enabled bool         `yaml:"enabled"`
-	Addr    string       `yaml:"addr"` // default ":8080"
-	APIKeys []APIKeyYAML `yaml:"api_keys"`
+	Enabled   bool         `yaml:"enabled"`
+	Addr      string       `yaml:"addr"`       // default ":8080"
+	RateLimit int          `yaml:"rate_limit"` // requests/second per IP; 0 = default (100), -1 = disabled
+	APIKeys   []APIKeyYAML `yaml:"api_keys"`
 }
 
 // APIKeyYAML holds an API key entry from YAML.
 type APIKeyYAML struct {
 	Name string `yaml:"name"`
-	Key  string `yaml:"key"`  // prefix: gqm_ak_
+	Key  string `yaml:"key"`  // prefix: gqm_ak_, minimum 32 chars
 	Role string `yaml:"role"` // "admin" or "viewer"; defaults to "admin"
 }
+
+const minAPIKeyLength = 32
 
 // DashboardConfig holds dashboard settings from YAML.
 type DashboardConfig struct {
@@ -342,6 +347,9 @@ func (m *MonitoringConfig) validate() error {
 			if u.PasswordHash == "" {
 				return fmt.Errorf("monitoring.auth.users[%d] %q: password_hash must not be empty", i, u.Username)
 			}
+			if !strings.HasPrefix(u.PasswordHash, "$2") {
+				return fmt.Errorf("monitoring.auth.users[%d] %q: password_hash must be a bcrypt hash ($2a$/$2b$ prefix); use 'gqm hash-password' to generate one", i, u.Username)
+			}
 			if u.Role != "" && u.Role != "admin" && u.Role != "viewer" {
 				return fmt.Errorf("monitoring.auth.users[%d] %q: role must be \"admin\" or \"viewer\"", i, u.Username)
 			}
@@ -362,6 +370,9 @@ func (m *MonitoringConfig) validate() error {
 		}
 		if k.Key == "" {
 			return fmt.Errorf("monitoring.api.api_keys[%d] %q: key must not be empty", i, k.Name)
+		}
+		if len(k.Key) < minAPIKeyLength {
+			return fmt.Errorf("monitoring.api.api_keys[%d] %q: key must be at least %d characters (use 'gqm generate-api-key')", i, k.Name, minAPIKeyLength)
 		}
 		if k.Role != "" && k.Role != "admin" && k.Role != "viewer" {
 			return fmt.Errorf("monitoring.api.api_keys[%d] %q: role must be \"admin\" or \"viewer\"", i, k.Name)
@@ -481,6 +492,9 @@ func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 	if cfg.Redis.Prefix != "" {
 		redisOpts = append(redisOpts, WithPrefix(cfg.Redis.Prefix))
 	}
+	if cfg.Redis.TLS {
+		redisOpts = append(redisOpts, WithRedisTLS(&tls.Config{})) //nolint:gosec // empty = system CA pool
+	}
 
 	// Build ServerOptions from config (these form the base; user opts override)
 	var serverOpts []ServerOption
@@ -533,6 +547,7 @@ func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 	mon := cfg.Monitoring
 	if mon.API.Enabled {
 		serverOpts = append(serverOpts, func(sc *serverConfig) {
+			sc.apiRateLimit = mon.API.RateLimit
 			sc.authSessionTTL = mon.Auth.SessionTTL
 			for _, u := range mon.Auth.Users {
 				sc.authUsers = append(sc.authUsers, AuthUser{

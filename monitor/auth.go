@@ -92,8 +92,10 @@ func (m *Monitor) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// CSRF protection: require X-GQM-CSRF header for session-cookie auth.
-		// Browsers will not send custom headers cross-origin without CORS preflight,
-		// so this prevents CSRF even if SameSite=Strict is somehow bypassed.
+		// Custom headers cannot be set cross-origin without CORS preflight
+		// (which we don't enable), so this prevents CSRF even if SameSite
+		// is somehow bypassed. A static value is sufficient because the
+		// protection comes from the header's presence, not its value.
 		// API key auth (X-GQM-User starts with "apikey:") is exempt.
 		user := r.Header.Get("X-GQM-User")
 		isCookieAuth := user != "" && !strings.HasPrefix(user, "apikey:")
@@ -157,7 +159,9 @@ func (m *Monitor) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Rate limit: check failed login attempts for this username
+	// Rate limit: check failed login attempts for this username.
+	// Combined with the per-IP rate limiter (middleware), this provides
+	// both per-username and per-IP brute force protection.
 	rateLimitKey := m.key("login_attempts", req.Username)
 	attempts, _ := m.rdb.Get(ctx, rateLimitKey).Int64()
 	if attempts >= loginRateLimit {

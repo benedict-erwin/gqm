@@ -28,7 +28,10 @@ GQM.api = {
 
         return fetch(url, opts).then(function(resp) {
             if (resp.status === 401) {
-                // Redirect to login
+                // Session expired or unauthenticated — show login with message.
+                if (GQM.app.authenticated) {
+                    GQM.app.loginMessage = 'Session expired. Please log in again.';
+                }
                 GQM.app.showLogin();
                 return Promise.reject(new Error('Unauthorized'));
             }

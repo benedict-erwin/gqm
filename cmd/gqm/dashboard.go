@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/benedict-erwin/gqm/monitor/dashboard"
 )
@@ -29,12 +30,23 @@ The directory will be created if it does not exist.`)
 }
 
 func exportDashboard(targetDir string) error {
+	// Resolve the target directory to its real path to prevent symlink traversal.
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		return fmt.Errorf("resolving target directory: %w", err)
+	}
+
 	return fs.WalkDir(dashboard.Assets, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		dest := filepath.Join(targetDir, path)
+		dest := filepath.Join(absTarget, path)
+
+		// Verify the destination stays within the target directory.
+		if !strings.HasPrefix(dest, absTarget) {
+			return fmt.Errorf("path traversal detected: %s", path)
+		}
 
 		if d.IsDir() {
 			return os.MkdirAll(dest, 0o755)

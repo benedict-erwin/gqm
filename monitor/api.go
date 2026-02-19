@@ -64,7 +64,10 @@ func (m *Monitor) setupRoutes() {
 	m.mux.HandleFunc("POST /api/v1/cron/{id}/enable", m.requireAuth(m.requireAdmin(m.handleEnableCron)))
 	m.mux.HandleFunc("POST /api/v1/cron/{id}/disable", m.requireAuth(m.requireAdmin(m.handleDisableCron)))
 
-	// Dashboard — static files served without auth (JS checks /auth/me on init)
+	// Dashboard — static files served without auth. This is intentional:
+	// the dashboard is a SPA that calls /auth/me on init to check auth status.
+	// All sensitive data is fetched via API endpoints which require auth.
+	// Static HTML/CSS/JS assets contain no user data.
 	if m.cfg.DashEnabled {
 		prefix := m.cfg.DashPathPrefix
 		if prefix == "" {
@@ -115,6 +118,9 @@ func pagination(r *http.Request) (page, limit int) {
 	page = queryInt(r, "page", 1)
 	if page < 1 {
 		page = 1
+	}
+	if page > 10000 {
+		page = 10000
 	}
 	limit = queryInt(r, "limit", 20)
 	if limit < 1 {

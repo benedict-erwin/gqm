@@ -28,6 +28,12 @@ func newUUIDAt(t time.Time) string {
 	uuidMu.Lock()
 	if ms == lastMS {
 		uuidSeq++
+		if uuidSeq == 0 {
+			// Wrapped around 65536 IDs in the same millisecond.
+			// Bump timestamp to ensure monotonicity.
+			ms++
+			lastMS = ms
+		}
 	} else {
 		lastMS = ms
 		uuidSeq = 0

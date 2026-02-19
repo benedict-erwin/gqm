@@ -55,11 +55,17 @@ func newLoggerFromLevel(level string) *slog.Logger {
 }
 
 func parseInt(s string) int {
-	v, _ := strconv.Atoi(s)
+	v, err := strconv.Atoi(s)
+	if err != nil && s != "" {
+		slog.Warn("parseInt: invalid integer value", "value", s, "error", err)
+	}
 	return v
 }
 
 func parseInt64(s string) int64 {
-	v, _ := strconv.ParseInt(s, 10, 64)
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil && s != "" {
+		slog.Warn("parseInt64: invalid integer value", "value", s, "error", err)
+	}
 	return v
 }
