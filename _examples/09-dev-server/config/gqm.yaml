@@ -1,0 +1,161 @@
+# GQM Dev Server — YAML Config Variant
+# Same features as the programmatic variant, but pools/queues/cron/auth defined in YAML.
+
+redis:
+  addr: localhost:6379
+  db: 0
+
+app:
+  timezone: UTC
+  log_level: debug
+  global_job_timeout: 1800   # 30 minutes
+  grace_period: 10
+  shutdown_timeout: 30
+
+queues:
+  - name: email:send
+    priority: 5
+  - name: report:generate
+    priority: 3
+  - name: notification:push
+    priority: 7
+  - name: image:resize
+    priority: 1
+  - name: data:export
+    priority: 3
+  - name: invoice:generate
+    priority: 5
+  - name: payment:process
+    priority: 8
+  - name: shipping:schedule
+    priority: 5
+  - name: analytics:aggregate
+    priority: 2
+
+pools:
+  - name: email-pool
+    job_types: ["email:send"]
+    queues: ["email:send"]
+    concurrency: 3
+    retry:
+      max_retry: 3
+      backoff: exponential
+      backoff_base: 2
+      backoff_max: 60
+
+  - name: report-pool
+    job_types: ["report:generate"]
+    queues: ["report:generate"]
+    concurrency: 2
+    job_timeout: 300
+    retry:
+      max_retry: 3
+      backoff: fixed
+      backoff_base: 10
+
+  - name: notification-pool
+    job_types: ["notification:push"]
+    queues: ["notification:push"]
+    concurrency: 5
+    retry:
+      max_retry: 2
+      backoff: fixed
+      backoff_base: 5
+
+  - name: image-pool
+    job_types: ["image:resize"]
+    queues: ["image:resize"]
+    concurrency: 2
+    retry:
+      max_retry: 1
+      backoff: fixed
+      backoff_base: 5
+
+  - name: export-pool
+    job_types: ["data:export"]
+    queues: ["data:export"]
+    concurrency: 2
+    retry:
+      max_retry: 3
+      backoff: exponential
+      backoff_base: 5
+      backoff_max: 120
+
+  - name: invoice-pool
+    job_types: ["invoice:generate"]
+    queues: ["invoice:generate"]
+    concurrency: 1
+
+  - name: payment-pool
+    job_types: ["payment:process"]
+    queues: ["payment:process"]
+    concurrency: 1
+    retry:
+      max_retry: 3
+      backoff: exponential
+      backoff_base: 2
+      backoff_max: 30
+
+  - name: shipping-pool
+    job_types: ["shipping:schedule"]
+    queues: ["shipping:schedule"]
+    concurrency: 1
+
+  - name: analytics-pool
+    job_types: ["analytics:aggregate"]
+    queues: ["analytics:aggregate"]
+    concurrency: 1
+
+scheduler:
+  poll_interval: 5
+  entries:
+    - id: daily-report
+      name: "Daily Summary Report"
+      cron_expr: "0 8 * * *"
+      job_type: report:generate
+      queue: report:generate
+      max_retry: 3
+      enabled: true
+
+    - id: hourly-cleanup
+      name: "Hourly Cleanup"
+      cron_expr: "0 * * * *"
+      job_type: data:export
+      queue: data:export
+      max_retry: 1
+      enabled: true
+
+    - id: weekly-digest
+      name: "Weekly Email Digest"
+      cron_expr: "0 9 * * 1"
+      job_type: email:send
+      queue: email:send
+      max_retry: 5
+      enabled: true
+
+    - id: disabled-task
+      name: "Disabled Maintenance Task"
+      cron_expr: "30 3 * * *"
+      job_type: data:export
+      queue: data:export
+      max_retry: 1
+      enabled: false
+
+monitoring:
+  enabled: true
+  addr: ":8080"
+  dashboard:
+    enabled: true
+  auth:
+    enabled: true
+    session_ttl: 86400
+    users:
+      - username: admin
+        # password: admin (generate with: gqm hash-password)
+        password_hash: "$2a$10$placeholder_replace_with_real_hash"
+        role: admin
+  api:
+    api_keys:
+      - name: dev-key
+        key: "gqm_ak_dev_server_config_key_for_testing_only"
+        role: admin

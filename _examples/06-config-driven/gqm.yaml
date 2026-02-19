@@ -1,0 +1,61 @@
+# GQM Config — Example 06: Config-driven Setup
+# All pool/queue definitions here. Code only registers handlers.
+
+redis:
+  addr: localhost:6379
+  db: 0
+
+app:
+  timezone: UTC
+  log_level: debug
+  global_job_timeout: 300    # 5 minutes
+  grace_period: 10
+  shutdown_timeout: 30
+
+queues:
+  - name: email:high
+    priority: 10
+  - name: email:low
+    priority: 1
+  - name: report:generate
+    priority: 5
+
+pools:
+  - name: email-pool
+    job_types:
+      - "email:send"
+      - "email:bulk"
+    queues:
+      - "email:high"       # priority 10 — processed first
+      - "email:low"        # priority 1  — processed when high is empty
+    concurrency: 4
+    job_timeout: 30
+    dequeue_strategy: strict
+    retry:
+      max_retry: 5
+      backoff: exponential
+      backoff_base: 2
+      backoff_max: 60
+
+  - name: report-pool
+    job_types:
+      - "report:generate"
+    queues:
+      - "report:generate"
+    concurrency: 2
+    job_timeout: 300       # 5 minutes for reports
+    retry:
+      max_retry: 3
+      backoff: fixed
+      backoff_base: 30
+
+scheduler:
+  poll_interval: 5
+  entries:
+    - id: temp-cleanup
+      name: "Temporary File Cleanup"
+      cron_expr: "0 */6 * * *"     # every 6 hours
+      job_type: "cleanup:temp"
+      queue: "email:low"           # low priority — use email pool
+      max_retry: 1
+      enabled: true
