@@ -3,14 +3,12 @@ module github.com/benedict-erwin/gqm
 go 1.26
 
 require (
-	github.com/benedict-erwin/gqm/tui v0.0.0
+	github.com/benedict-erwin/gqm/tui v0.1.0
 	github.com/redis/go-redis/v9 v9.17.3
 	golang.org/x/crypto v0.48.0
 	golang.org/x/term v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )
-
-replace github.com/benedict-erwin/gqm/tui => ./tui
 
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
