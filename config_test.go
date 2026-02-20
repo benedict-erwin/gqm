@@ -875,6 +875,92 @@ func TestNewServerFromConfig_CatchAllPool(t *testing.T) {
 	}
 }
 
+func TestNewServerFromConfig_MonitoringFull(t *testing.T) {
+	skipWithoutRedis(t)
+
+	cfg := &Config{
+		Redis: RedisYAML{
+			Addr:     testRedisAddr(),
+			Password: "testpass",
+			DB:       2,
+			Prefix:   "test:",
+		},
+		Monitoring: MonitoringConfig{
+			API: APIConfig{
+				Enabled:   true,
+				Addr:      "127.0.0.1:0",
+				RateLimit: 50,
+				APIKeys: []APIKeyYAML{
+					{Name: "key1", Key: "gqm_ak_test1234567890abcdef", Role: "admin"},
+				},
+			},
+			Dashboard: DashboardConfig{
+				Enabled:    true,
+				PathPrefix: "/dash",
+				CustomDir:  "/tmp/test-dash",
+			},
+			Auth: AuthConfig{
+				Enabled:    true,
+				SessionTTL: 3600,
+				Users: []UserYAML{
+					{Username: "admin", PasswordHash: "$2a$10$hash", Role: "admin"},
+				},
+			},
+		},
+	}
+
+	server, err := NewServerFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("NewServerFromConfig: %v", err)
+	}
+	defer server.rc.Close()
+
+	if !server.cfg.dashEnabled {
+		t.Error("dashEnabled should be true")
+	}
+	if server.cfg.dashPathPrefix != "/dash" {
+		t.Errorf("dashPathPrefix = %q", server.cfg.dashPathPrefix)
+	}
+	if server.cfg.dashCustomDir != "/tmp/test-dash" {
+		t.Errorf("dashCustomDir = %q", server.cfg.dashCustomDir)
+	}
+	if !server.cfg.authEnabled {
+		t.Error("authEnabled should be true")
+	}
+	if len(server.cfg.authUsers) != 1 {
+		t.Errorf("authUsers len = %d", len(server.cfg.authUsers))
+	}
+	if len(server.cfg.apiKeys) != 1 {
+		t.Errorf("apiKeys len = %d", len(server.cfg.apiKeys))
+	}
+	if server.cfg.apiRateLimit != 50 {
+		t.Errorf("apiRateLimit = %d", server.cfg.apiRateLimit)
+	}
+	if server.cfg.authSessionTTL != 3600 {
+		t.Errorf("authSessionTTL = %d", server.cfg.authSessionTTL)
+	}
+	if server.mon == nil {
+		t.Error("monitor should be initialized")
+	}
+}
+
+func TestNewServerFromConfig_PoolRegistrationError(t *testing.T) {
+	skipWithoutRedis(t)
+
+	cfg := &Config{
+		Redis: RedisYAML{Addr: testRedisAddr()},
+		Pools: []PoolYAML{
+			{Name: "dup", JobTypes: []string{"a"}, Concurrency: 1},
+			{Name: "dup", JobTypes: []string{"b"}, Concurrency: 1},
+		},
+	}
+
+	_, err := NewServerFromConfig(cfg)
+	if err == nil {
+		t.Error("expected error for duplicate pool names")
+	}
+}
+
 // --- ServerOption tests ---
 
 func TestWithDefaultTimezone(t *testing.T) {

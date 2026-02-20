@@ -17,9 +17,11 @@ GQM.pages.overview = {
             '<canvas id="chart-canvas"></canvas>' +
             '</div>';
 
-        GQM.app.poll(function() { GQM.pages.overview.loadStats(); }, 5000);
+        GQM.app.poll(function() {
+            GQM.pages.overview.loadStats();
+            GQM.pages.overview.loadRuntime();
+        }, 5000);
         GQM.pages.overview.loadDaily();
-        GQM.pages.overview.loadRuntime();
     },
 
     loadStats: function() {

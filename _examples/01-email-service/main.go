@@ -14,7 +14,7 @@
 //
 //	go run ./_examples/01-email-service
 //
-// Prerequisites: Redis on localhost:6379 (or set GQM_REDIS_ADDR)
+// Prerequisites: Redis on localhost:6379 (or set GQM_TEST_REDIS_ADDR)
 package main
 
 import (
@@ -30,7 +30,7 @@ import (
 )
 
 func main() {
-	redisAddr := envOr("GQM_REDIS_ADDR", "localhost:6379")
+	redisAddr := envOr("GQM_TEST_REDIS_ADDR", "localhost:6379")
 
 	// ── Producer ──────────────────────────────────────────────────
 

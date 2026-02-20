@@ -3,17 +3,18 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
+	"io"
 
 	"gopkg.in/yaml.v3"
 )
 
-func runRevokeAPIKey(args []string) {
-	fs := flag.NewFlagSet("revoke-api-key", flag.ExitOnError)
+func runRevokeAPIKey(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("revoke-api-key", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "Path to GQM config file (required)")
 	name := fs.String("name", "", "Name of the API key to revoke (required)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `Usage: gqm revoke-api-key --config <file> --name <name>
+		fmt.Fprintln(stderr, `Usage: gqm revoke-api-key --config <file> --name <name>
 
 Remove an API key from the GQM config file.
 
@@ -22,21 +23,22 @@ Flags:`)
 	}
 
 	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+		return 1
 	}
 
 	if *configPath == "" || *name == "" {
 		fs.Usage()
-		os.Exit(1)
+		return 1
 	}
 
 	if err := removeAPIKey(*configPath, *name); err != nil {
-		fmt.Fprintf(os.Stderr, "gqm: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		return 1
 	}
 
-	fmt.Printf("API key %q revoked from %s\n", *name, *configPath)
-	fmt.Print(restartNotice)
+	fmt.Fprintf(stdout, "API key %q revoked from %s\n", *name, *configPath)
+	fmt.Fprint(stdout, restartNotice)
+	return 0
 }
 
 func removeAPIKey(configPath, name string) error {

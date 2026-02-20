@@ -26,6 +26,7 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 - **CLI tool** — Config management, password hashing, API key generation, dashboard export
 - **TUI monitor** — Terminal UI with live queue/worker/cron monitoring (separate Go module)
 - **Atomic operations** — 12 Lua scripts for race-free Redis state transitions
+- **Redis Sentinel support** — Inject pre-configured `*redis.Client` via `WithRedisClient()` for Sentinel, Cluster, or custom setups
 - **Minimal dependencies** — Only 3 production deps: go-redis, yaml.v3, x/crypto
 
 ## Requirements
@@ -320,6 +321,24 @@ jobs, err := client.EnqueueBatch(ctx, items)
 
 **Limits:** max 1000 items per batch. `DependsOn`, `Unique`, and `EnqueueAtFront` are not supported in batch mode.
 
+## Custom Redis Client (Sentinel / Cluster)
+
+GQM connects to a standalone Redis by default. For Sentinel, Cluster, or any custom go-redis configuration, inject a pre-configured `*redis.Client`:
+
+```go
+// Redis Sentinel
+rdb := redis.NewFailoverClient(&redis.FailoverOptions{
+    MasterName:    "mymaster",
+    SentinelAddrs: []string{"sentinel1:26379", "sentinel2:26379", "sentinel3:26379"},
+    Password:      "secret",
+})
+
+client, _ := gqm.NewClient(gqm.WithRedisClient(rdb))
+server, _ := gqm.NewServer(gqm.WithServerRedisClient(rdb))
+```
+
+When `WithRedisClient` is used, connection options (`WithRedisAddr`, `WithRedisPassword`, etc.) are ignored — only `WithPrefix` still applies.
+
 ## Delayed & Scheduled Jobs
 
 ```go
@@ -471,6 +490,41 @@ monitoring:
 | DAG | Dependency graph visualization with Cytoscape.js |
 
 **Auth & security:** Session cookies (bcrypt + HttpOnly/Secure/SameSite), API keys with constant-time comparison, RBAC (admin/viewer), CSRF protection, login rate limiting. Health check at `GET /health` requires no auth.
+
+**Customizing the dashboard:**
+
+You can replace the built-in dashboard with your own HTML/CSS/JS files. GQM's REST API remains fully available as your backend.
+
+```bash
+# Step 1: Export the built-in dashboard as a starting point
+gqm dashboard export ./my-dashboard
+
+# Step 2: Edit the files in ./my-dashboard/ (HTML, CSS, JS)
+
+# Step 3: Point your server to the custom directory
+```
+
+```go
+server, _ := gqm.NewServer(
+    gqm.WithServerRedis("localhost:6379"),
+    gqm.WithAPI(true, ":8080"),
+    gqm.WithDashboard(true),
+    gqm.WithDashboardDir("./my-dashboard"),   // override embedded dashboard
+    gqm.WithDashboardPathPrefix("/my-panel"),  // optional: change URL path (default: /dashboard)
+)
+```
+
+Or via YAML config:
+
+```yaml
+monitoring:
+  dashboard:
+    enabled: true
+    custom_dir: "./my-dashboard"
+    path_prefix: "/my-panel"
+```
+
+When `custom_dir` is set, GQM serves files entirely from that directory instead of the embedded assets. All API endpoints (`/api/v1/*`, `/auth/*`, `/health`) continue to work normally — only the dashboard static files are replaced. See [`_examples/11-custom-dashboard`](_examples/11-custom-dashboard/) for a working example.
 
 ### TUI
 

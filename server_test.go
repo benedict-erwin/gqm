@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func testServer(t *testing.T) *Server {
@@ -295,5 +298,128 @@ func TestServer_Schedule_Invalid(t *testing.T) {
 				t.Error("expected error")
 			}
 		})
+	}
+}
+
+func TestServerOptions_Dashboard(t *testing.T) {
+	skipWithoutRedis(t)
+	s, err := NewServer(
+		WithServerRedis(testRedisAddr()),
+		WithDashboard(true),
+		WithDashboardDir("/custom/dir"),
+		WithDashboardPathPrefix("/dash"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.rc.Close() })
+
+	if !s.cfg.dashEnabled {
+		t.Error("dashEnabled should be true")
+	}
+	if s.cfg.dashCustomDir != "/custom/dir" {
+		t.Errorf("dashCustomDir = %q", s.cfg.dashCustomDir)
+	}
+	if s.cfg.dashPathPrefix != "/dash" {
+		t.Errorf("dashPathPrefix = %q", s.cfg.dashPathPrefix)
+	}
+}
+
+func TestServerOptions_Auth(t *testing.T) {
+	skipWithoutRedis(t)
+	users := []AuthUser{{Username: "admin", PasswordHash: "hash", Role: "admin"}}
+	keys := []AuthAPIKey{{Key: "key1", Name: "test", Role: "admin"}}
+	s, err := NewServer(
+		WithServerRedis(testRedisAddr()),
+		WithAuthEnabled(true),
+		WithAuthUsers(users),
+		WithAPIKeys(keys),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.rc.Close() })
+
+	if !s.cfg.authEnabled {
+		t.Error("authEnabled should be true")
+	}
+	if len(s.cfg.authUsers) != 1 {
+		t.Errorf("authUsers len = %d, want 1", len(s.cfg.authUsers))
+	}
+	if len(s.cfg.apiKeys) != 1 {
+		t.Errorf("apiKeys len = %d, want 1", len(s.cfg.apiKeys))
+	}
+}
+
+func TestServer_Stop(t *testing.T) {
+	skipWithoutRedis(t)
+	s, err := NewServer(WithServerRedis(testRedisAddr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.rc.Close() })
+
+	// Stop should not panic even when called multiple times.
+	s.Stop()
+	s.Stop()
+}
+
+func TestServer_ResolveTimeout(t *testing.T) {
+	s := testServer(t)
+
+	// Job-level timeout takes priority.
+	job := &Job{Timeout: 60}
+	pcfg := &poolConfig{jobTimeout: 30 * time.Second}
+	if d := s.resolveTimeout(job, pcfg); d != 60*time.Second {
+		t.Errorf("job-level: got %v, want 60s", d)
+	}
+
+	// Pool-level timeout fallback.
+	job = &Job{Timeout: 0}
+	if d := s.resolveTimeout(job, pcfg); d != 30*time.Second {
+		t.Errorf("pool-level: got %v, want 30s", d)
+	}
+
+	// Global default fallback.
+	pcfg = &poolConfig{jobTimeout: 0}
+	if d := s.resolveTimeout(job, pcfg); d != s.cfg.globalTimeout {
+		t.Errorf("global: got %v, want %v", d, s.cfg.globalTimeout)
+	}
+}
+
+func TestServer_StartAlreadyRunning(t *testing.T) {
+	s := testServer(t)
+	// Mark as running.
+	s.running = true
+
+	err := s.Start(context.Background())
+	if err == nil {
+		t.Error("expected error for already running server")
+	}
+}
+
+func TestServer_WithServerRedisClient(t *testing.T) {
+	skipWithoutRedis(t)
+
+	rdb := redis.NewClient(&redis.Options{Addr: testRedisAddr()})
+	defer rdb.Close()
+
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		t.Skipf("requires Redis: %v", err)
+	}
+
+	srv, err := NewServer(WithServerRedisClient(rdb))
+	if err != nil {
+		t.Fatalf("creating server with injected client: %v", err)
+	}
+
+	// Server should use the injected client.
+	if srv.rc.Unwrap() != rdb {
+		t.Error("server should use the injected redis client")
+	}
+
+	// Server's RedisClient should NOT own the connection.
+	if srv.rc.owned {
+		t.Error("server's RedisClient should not own an injected client")
 	}
 }

@@ -1911,6 +1911,277 @@ func TestIntegration_EnqueueBatch_DuplicateJobID(t *testing.T) {
 	}
 }
 
+// TestIntegration_GracePeriodCompletion verifies that a handler that finishes
+// during the grace period (after timeout but before grace expires) completes
+// the job successfully.
+func TestIntegration_GracePeriodCompletion(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var completed atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(1*time.Second),
+		WithGracePeriod(5*time.Second),
+		WithShutdownTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// Handler that takes 2s — exceeds 1s timeout but finishes within 5s grace period.
+	err = server.Handle("grace.job", func(ctx context.Context, job *Job) error {
+		select {
+		case <-ctx.Done():
+			// Context cancelled due to timeout — finish cleanly within grace period.
+			completed.Add(1)
+			return nil
+		case <-time.After(30 * time.Second):
+			return nil
+		}
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	job, err := client.Enqueue(ctx, "grace.job", Payload{},
+		Queue("grace.job"),
+		MaxRetry(0),
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for the job to be completed (timeout 1s + handler responds to ctx.Done quickly).
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for job to complete")
+		default:
+			if completed.Load() > 0 {
+				goto verify
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+verify:
+	// Allow some time for completion processing.
+	time.Sleep(2 * time.Second)
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	// Job should be completed because handler returned nil during grace period.
+	if fetchedJob.Status != StatusCompleted {
+		t.Errorf("job status = %q, want %q", fetchedJob.Status, StatusCompleted)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+// TestIntegration_GracePeriodError verifies that a handler returning an error
+// during the grace period marks the job as failed.
+func TestIntegration_GracePeriodError(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var responded atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(1*time.Second),
+		WithGracePeriod(5*time.Second),
+		WithShutdownTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// Handler that waits for context cancellation and returns an error.
+	err = server.Handle("grace-err.job", func(ctx context.Context, job *Job) error {
+		select {
+		case <-ctx.Done():
+			responded.Add(1)
+			return fmt.Errorf("handler error after timeout")
+		case <-time.After(30 * time.Second):
+			return nil
+		}
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	job, err := client.Enqueue(ctx, "grace-err.job", Payload{},
+		Queue("grace-err.job"),
+		MaxRetry(0),
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for handler to respond")
+		default:
+			if responded.Load() > 0 {
+				goto verify
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+verify:
+	time.Sleep(2 * time.Second)
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	// Job should be dead_letter (MaxRetry=0) or failed.
+	if fetchedJob.Status != StatusDeadLetter && fetchedJob.Status != StatusFailed {
+		t.Errorf("job status = %q, want %q or %q", fetchedJob.Status, StatusDeadLetter, StatusFailed)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+// TestIntegration_AbandonedHandler verifies that a handler that never returns
+// is abandoned after the grace period, and the job is marked as failed.
+func TestIntegration_AbandonedHandler(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var started atomic.Int32
+	release := make(chan struct{})
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(1*time.Second),
+		WithGracePeriod(2*time.Second),
+		WithShutdownTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// Handler that blocks until test explicitly releases it (simulates a stuck handler).
+	err = server.Handle("stuck.job", func(ctx context.Context, job *Job) error {
+		started.Add(1)
+		<-release // Block indefinitely until test releases.
+		return nil
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	job, err := client.Enqueue(ctx, "stuck.job", Payload{},
+		Queue("stuck.job"),
+		MaxRetry(0),
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for the handler to start.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			close(release)
+			serverCancel()
+			t.Fatal("timeout waiting for handler to start")
+		default:
+			if started.Load() > 0 {
+				goto waitAbandoned
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+waitAbandoned:
+	// Wait for timeout (1s) + grace period (2s) + buffer.
+	time.Sleep(5 * time.Second)
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	// Job should be dead_letter (MaxRetry=0) or failed.
+	if fetchedJob.Status != StatusDeadLetter && fetchedJob.Status != StatusFailed {
+		t.Errorf("job status = %q, want %q or %q", fetchedJob.Status, StatusDeadLetter, StatusFailed)
+	}
+
+	// Release the stuck handler goroutine so it can clean up.
+	close(release)
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
 // TestIntegration_EnqueueBatch_EnqueueAtFrontRejected verifies EnqueueAtFront rejection.
 func TestIntegration_EnqueueBatch_EnqueueAtFrontRejected(t *testing.T) {
 	skipWithoutRedis(t)

@@ -201,4 +201,39 @@ func TestLoadConfigNode_Errors(t *testing.T) {
 			t.Error("expected error for invalid yaml")
 		}
 	})
+
+	t.Run("empty file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "empty.yaml")
+		os.WriteFile(path, []byte(""), 0o644)
+		_, err := loadConfigNode(path)
+		if err == nil {
+			t.Error("expected error for empty yaml file")
+		}
+	})
+}
+
+func TestSaveConfigNode_WriteError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "readonly.yaml")
+	// Create the file first so stat succeeds.
+	os.WriteFile(path, []byte("key: value\n"), 0o644)
+	// Make it read-only.
+	os.Chmod(path, 0o444)
+	t.Cleanup(func() { os.Chmod(path, 0o644) })
+
+	doc := &yaml.Node{
+		Kind: yaml.DocumentNode,
+		Content: []*yaml.Node{
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "key"},
+				{Kind: yaml.ScalarNode, Value: "updated"},
+			}},
+		},
+	}
+
+	err := saveConfigNode(path, doc)
+	if err == nil {
+		t.Error("expected error for read-only file")
+	}
 }

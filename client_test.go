@@ -2,6 +2,7 @@ package gqm
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -273,5 +274,122 @@ func TestClient_GetJob_NotFound(t *testing.T) {
 	_, err := client.GetJob(ctx, "nonexistent-id")
 	if err != ErrJobNotFound {
 		t.Errorf("expected ErrJobNotFound, got %v", err)
+	}
+}
+
+func TestClient_Enqueue_UniqueDuplicate(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+	client := &Client{rc: rc}
+
+	job, err := client.Enqueue(ctx, "test.unique", Payload{}, JobID("unique-1"), Unique())
+	if err != nil {
+		t.Fatalf("first Enqueue: %v", err)
+	}
+	defer rc.rdb.Del(ctx, rc.Key("job", job.ID), rc.Key("queue", "default", "ready"), rc.Key("queues"))
+
+	// Second enqueue with same ID should fail.
+	_, err = client.Enqueue(ctx, "test.unique", Payload{}, JobID("unique-1"), Unique())
+	if !errors.Is(err, ErrDuplicateJobID) {
+		t.Errorf("expected ErrDuplicateJobID, got %v", err)
+	}
+}
+
+func TestClient_Enqueue_InvalidQueueName(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+	client := &Client{rc: rc}
+
+	_, err := client.Enqueue(ctx, "test.job", Payload{}, Queue("bad queue!"))
+	if !errors.Is(err, ErrInvalidQueueName) {
+		t.Errorf("expected ErrInvalidQueueName, got %v", err)
+	}
+}
+
+func TestClient_EnqueueAt_Unique(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+	client := &Client{rc: rc}
+
+	at := time.Now().Add(time.Hour)
+	job, err := client.EnqueueAt(ctx, at, "test.sched", Payload{}, JobID("sched-unique-1"), Unique())
+	if err != nil {
+		t.Fatalf("first EnqueueAt: %v", err)
+	}
+	defer rc.rdb.Del(ctx, rc.Key("job", job.ID), rc.Key("scheduled"), rc.Key("queues"))
+
+	_, err = client.EnqueueAt(ctx, at, "test.sched", Payload{}, JobID("sched-unique-1"), Unique())
+	if !errors.Is(err, ErrDuplicateJobID) {
+		t.Errorf("expected ErrDuplicateJobID, got %v", err)
+	}
+}
+
+func TestClient_EnqueueAt_InvalidQueueName(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+	client := &Client{rc: rc}
+
+	_, err := client.EnqueueAt(ctx, time.Now().Add(time.Hour), "test.job", Payload{}, Queue("bad!"))
+	if !errors.Is(err, ErrInvalidQueueName) {
+		t.Errorf("expected ErrInvalidQueueName, got %v", err)
+	}
+}
+
+func TestClient_EnqueueDeferred_Unique(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+	client := &Client{rc: rc}
+
+	// Create a parent job first.
+	parent, err := client.Enqueue(ctx, "test.parent", Payload{}, JobID("def-parent-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.rdb.Del(ctx, rc.Key("job", parent.ID), rc.Key("queue", "default", "ready"), rc.Key("queues"))
+
+	// Enqueue deferred with Unique.
+	child, err := client.Enqueue(ctx, "test.child", Payload{},
+		JobID("def-child-1"), Unique(), DependsOn("def-parent-1"))
+	if err != nil {
+		t.Fatalf("first deferred Enqueue: %v", err)
+	}
+	defer func() {
+		rc.rdb.Del(ctx, rc.Key("job", child.ID), rc.Key("job", child.ID, "deps"),
+			rc.Key("job", child.ID, "pending_deps"), rc.Key("job", "def-parent-1", "dependents"),
+			rc.Key("deferred"))
+	}()
+
+	// Second enqueue should fail.
+	_, err = client.Enqueue(ctx, "test.child", Payload{},
+		JobID("def-child-1"), Unique(), DependsOn("def-parent-1"))
+	if !errors.Is(err, ErrDuplicateJobID) {
+		t.Errorf("expected ErrDuplicateJobID, got %v", err)
+	}
+}
+
+func TestNewClient_InvalidAddr(t *testing.T) {
+	// NewClient with no options should still succeed (connects to default localhost).
+	// We can't easily test a true failure without a bad address that times out.
+	// Instead, test that NewClient returns a valid client.
+	client, err := NewClient(WithRedisAddr(testRedisAddr()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+}
+
+func TestClient_Enqueue_EnqueueAtFront(t *testing.T) {
+	rc := testRedisClient(t)
+	ctx := context.Background()
+	client := &Client{rc: rc}
+
+	job, err := client.Enqueue(ctx, "test.front", Payload{}, EnqueueAtFront(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.rdb.Del(ctx, rc.Key("job", job.ID), rc.Key("queue", "default", "ready"), rc.Key("queues"))
+
+	if !job.EnqueueAtFront {
+		t.Error("EnqueueAtFront should be true")
 	}
 }

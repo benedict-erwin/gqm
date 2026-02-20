@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"syscall"
@@ -13,12 +14,16 @@ import (
 	"golang.org/x/term"
 )
 
-func runSetPassword(args []string) {
-	fs := flag.NewFlagSet("set-password", flag.ExitOnError)
+// passwordReader can be replaced in tests for non-interactive password input.
+var passwordReader = promptPassword
+
+func runSetPassword(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("set-password", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "Path to GQM config file (required)")
 	username := fs.String("user", "", "Username to set password for (required)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `Usage: gqm set-password --config <file> --user <username>
+		fmt.Fprintln(stderr, `Usage: gqm set-password --config <file> --user <username>
 
 Set or update a user's password in the GQM config file.
 The password is read from an interactive prompt (not passed as an argument).
@@ -28,38 +33,39 @@ Flags:`)
 	}
 
 	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+		return 1
 	}
 
 	if *configPath == "" || *username == "" {
 		fs.Usage()
-		os.Exit(1)
+		return 1
 	}
 
-	password, err := promptPassword()
+	password, err := passwordReader()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gqm: reading password: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gqm: reading password: %v\n", err)
+		return 1
 	}
 
 	if strings.TrimSpace(password) == "" {
-		fmt.Fprintln(os.Stderr, "gqm: password must not be empty")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "gqm: password must not be empty")
+		return 1
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gqm: hashing password: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gqm: hashing password: %v\n", err)
+		return 1
 	}
 
 	if err := injectPassword(*configPath, *username, string(hash)); err != nil {
-		fmt.Fprintf(os.Stderr, "gqm: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		return 1
 	}
 
-	fmt.Printf("Password updated for user %q in %s\n", *username, *configPath)
-	fmt.Print(restartNotice)
+	fmt.Fprintf(stdout, "Password updated for user %q in %s\n", *username, *configPath)
+	fmt.Fprint(stdout, restartNotice)
+	return 0
 }
 
 func promptPassword() (string, error) {

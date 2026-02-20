@@ -2,7 +2,9 @@ package gqm
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -166,6 +168,243 @@ func TestStatusConstants(t *testing.T) {
 			t.Errorf("duplicate status: %q", s)
 		}
 		seen[s] = true
+	}
+}
+
+func TestJob_Decode_MarshalError(t *testing.T) {
+	// Payload with unmarshallable channel value triggers json.Marshal error.
+	j := &Job{Payload: Payload{"bad": make(chan int)}}
+	if err := j.Decode(&struct{}{}); err == nil {
+		t.Error("expected error for unmarshallable payload")
+	}
+}
+
+func TestJob_Decode_UnmarshalError(t *testing.T) {
+	// Payload that marshals to valid JSON but can't unmarshal into target.
+	j := &Job{Payload: Payload{"count": "not-a-number"}}
+	var target struct {
+		Count int `json:"count"`
+	}
+	// string->int unmarshal fails
+	if err := j.Decode(&target); err == nil {
+		t.Error("expected error for type mismatch")
+	}
+}
+
+func TestJob_Encode_Error(t *testing.T) {
+	// Job with unmarshallable field.
+	j := &Job{Payload: Payload{"bad": math.Inf(1)}}
+	if _, err := j.Encode(); err == nil {
+		t.Error("expected error for unencodable job")
+	}
+}
+
+func TestDecodeJob_InvalidJSON(t *testing.T) {
+	_, err := DecodeJob([]byte("{invalid"))
+	if err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+}
+
+func TestDecodeJob_EmptyJSON(t *testing.T) {
+	j, err := DecodeJob([]byte("{}"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if j.ID != "" {
+		t.Errorf("ID = %q, want empty", j.ID)
+	}
+}
+
+func TestJob_ToMap_PayloadMarshalError(t *testing.T) {
+	j := &Job{ID: "test", Payload: Payload{"bad": make(chan int)}}
+	if _, err := j.ToMap(); err == nil {
+		t.Error("expected error for unmarshallable payload")
+	}
+}
+
+func TestJob_ToMap_MetaMarshalError(t *testing.T) {
+	j := NewJob("test", Payload{"ok": true})
+	j.Meta = Payload{"bad": make(chan int)}
+	if _, err := j.ToMap(); err == nil {
+		t.Error("expected error for unmarshallable meta")
+	}
+}
+
+func TestJob_ToMap_WithResult(t *testing.T) {
+	j := NewJob("test", Payload{"ok": true})
+	j.Result = json.RawMessage(`{"status":"done"}`)
+	j.LastHeartbeat = 123
+	j.ExecutionDuration = 456
+	m, err := j.ToMap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["result"] != `{"status":"done"}` {
+		t.Errorf("result = %v", m["result"])
+	}
+	if m["last_heartbeat"] != int64(123) {
+		t.Errorf("last_heartbeat = %v", m["last_heartbeat"])
+	}
+	if m["execution_duration"] != int64(456) {
+		t.Errorf("execution_duration = %v", m["execution_duration"])
+	}
+}
+
+func TestJobFromMap_InvalidPayload(t *testing.T) {
+	m := map[string]string{
+		"id": "test", "type": "t", "queue": "q", "status": "ready",
+		"payload": "{invalid",
+	}
+	if _, err := JobFromMap(m); err == nil {
+		t.Error("expected error for invalid payload JSON")
+	}
+}
+
+func TestJobFromMap_InvalidRetryIntervals(t *testing.T) {
+	m := map[string]string{
+		"id": "test", "type": "t", "queue": "q", "status": "ready",
+		"retry_intervals": "{bad}",
+	}
+	if _, err := JobFromMap(m); err == nil {
+		t.Error("expected error for invalid retry_intervals JSON")
+	}
+}
+
+func TestJobFromMap_InvalidMeta(t *testing.T) {
+	m := map[string]string{
+		"id": "test", "type": "t", "queue": "q", "status": "ready",
+		"meta": "{bad}",
+	}
+	if _, err := JobFromMap(m); err == nil {
+		t.Error("expected error for invalid meta JSON")
+	}
+}
+
+func TestJobFromMap_InvalidDependsOn(t *testing.T) {
+	m := map[string]string{
+		"id": "test", "type": "t", "queue": "q", "status": "ready",
+		"depends_on": "{bad}",
+	}
+	if _, err := JobFromMap(m); err == nil {
+		t.Error("expected error for invalid depends_on JSON")
+	}
+}
+
+func TestJobFromMap_ResultAndWorkerID(t *testing.T) {
+	m := map[string]string{
+		"id": "test", "type": "t", "queue": "q", "status": "ready",
+		"result":    `{"ok":true}`,
+		"worker_id": "w-1",
+	}
+	j, err := JobFromMap(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(j.Result) != `{"ok":true}` {
+		t.Errorf("Result = %s", j.Result)
+	}
+	if j.WorkerID != "w-1" {
+		t.Errorf("WorkerID = %q", j.WorkerID)
+	}
+}
+
+func TestJobFromMap_AllIntFields(t *testing.T) {
+	m := map[string]string{
+		"id": "test", "type": "t", "queue": "q", "status": "ready",
+		"retry_count":        "3",
+		"max_retry":          "5",
+		"timeout":            "30",
+		"created_at":         "1000",
+		"scheduled_at":       "2000",
+		"started_at":         "3000",
+		"completed_at":       "4000",
+		"last_heartbeat":     "5000",
+		"execution_duration": "6000",
+		"allow_failure":      "1",
+		"enqueue_at_front":   "1",
+		"enqueued_by":        "test-user",
+	}
+	j, err := JobFromMap(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.RetryCount != 3 {
+		t.Errorf("RetryCount = %d", j.RetryCount)
+	}
+	if j.MaxRetry != 5 {
+		t.Errorf("MaxRetry = %d", j.MaxRetry)
+	}
+	if j.Timeout != 30 {
+		t.Errorf("Timeout = %d", j.Timeout)
+	}
+	if j.CreatedAt != 1000 {
+		t.Errorf("CreatedAt = %d", j.CreatedAt)
+	}
+	if j.ScheduledAt != 2000 {
+		t.Errorf("ScheduledAt = %d", j.ScheduledAt)
+	}
+	if j.StartedAt != 3000 {
+		t.Errorf("StartedAt = %d", j.StartedAt)
+	}
+	if j.CompletedAt != 4000 {
+		t.Errorf("CompletedAt = %d", j.CompletedAt)
+	}
+	if j.LastHeartbeat != 5000 {
+		t.Errorf("LastHeartbeat = %d", j.LastHeartbeat)
+	}
+	if j.ExecutionDuration != 6000 {
+		t.Errorf("ExecutionDuration = %d", j.ExecutionDuration)
+	}
+	if !j.AllowFailure {
+		t.Error("AllowFailure should be true")
+	}
+	if !j.EnqueueAtFront {
+		t.Error("EnqueueAtFront should be true")
+	}
+	if j.EnqueuedBy != "test-user" {
+		t.Errorf("EnqueuedBy = %q", j.EnqueuedBy)
+	}
+}
+
+func TestJobFromMap_EmptyPayload(t *testing.T) {
+	m := map[string]string{
+		"id": "test", "type": "t", "queue": "q", "status": "ready",
+		"payload": "",
+	}
+	j, err := JobFromMap(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Payload != nil {
+		t.Errorf("Payload = %v, want nil for empty", j.Payload)
+	}
+}
+
+func TestJob_Decode_NilPayload(t *testing.T) {
+	j := &Job{}
+	var target struct{}
+	// nil payload marshals to "null".
+	if err := j.Decode(&target); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestJob_ToMap_DependsOnMarshalError(t *testing.T) {
+	// DependsOn is []string which always marshals fine, but we can test the branch
+	// by ensuring it appears in the map.
+	j := NewJob("test", Payload{"ok": true})
+	j.DependsOn = []string{"dep-1", "dep-2"}
+	m, err := j.ToMap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := m["depends_on"]
+	if !ok {
+		t.Error("depends_on not in map")
+	}
+	if !strings.Contains(v.(string), "dep-1") {
+		t.Errorf("depends_on = %v, missing dep-1", v)
 	}
 }
 

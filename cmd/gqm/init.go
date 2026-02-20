@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -88,11 +89,26 @@ monitoring:
     # custom_dir: ""           # Path to custom dashboard files (overrides embedded)
 `
 
-func runInit(args []string) {
-	fs := flag.NewFlagSet("init", flag.ExitOnError)
+// initConfig creates a new GQM config file at the given path.
+// Returns an error if the file already exists.
+func initConfig(configPath string) error {
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("%s already exists (will not overwrite)", configPath)
+	}
+
+	if err := os.WriteFile(configPath, []byte(configTemplate), 0o644); err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+
+	return nil
+}
+
+func runInit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	configPath := fs.String("config", "gqm.yaml", "Path for the new config file")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `Usage: gqm init [--config <file>]
+		fmt.Fprintln(stderr, `Usage: gqm init [--config <file>]
 
 Generate a GQM config file with sensible defaults and documentation comments.
 Default output: gqm.yaml in the current directory.
@@ -102,25 +118,20 @@ Flags:`)
 	}
 
 	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+		return 1
 	}
 
-	// Prevent overwriting existing file.
-	if _, err := os.Stat(*configPath); err == nil {
-		fmt.Fprintf(os.Stderr, "gqm: %s already exists (will not overwrite)\n", *configPath)
-		os.Exit(1)
+	if err := initConfig(*configPath); err != nil {
+		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		return 1
 	}
 
-	if err := os.WriteFile(*configPath, []byte(configTemplate), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "gqm: writing config: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Config file created: %s\n\n", *configPath)
-	fmt.Println("Next steps:")
-	fmt.Println("  1. Edit the config file to match your environment")
-	fmt.Println("  2. Set up authentication:")
-	fmt.Println("       gqm set-password --config " + *configPath + " --user admin")
-	fmt.Println("       gqm add-api-key --config " + *configPath + " --name my-key")
-	fmt.Println("  3. Start your GQM server with the config file")
+	fmt.Fprintf(stdout, "Config file created: %s\n\n", *configPath)
+	fmt.Fprintln(stdout, "Next steps:")
+	fmt.Fprintln(stdout, "  1. Edit the config file to match your environment")
+	fmt.Fprintln(stdout, "  2. Set up authentication:")
+	fmt.Fprintln(stdout, "       gqm set-password --config "+*configPath+" --user admin")
+	fmt.Fprintln(stdout, "       gqm add-api-key --config "+*configPath+" --name my-key")
+	fmt.Fprintln(stdout, "  3. Start your GQM server with the config file")
+	return 0
 }

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GQM Custom Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; padding: 2rem; }
+        h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+        .subtitle { color: #94a3b8; margin-bottom: 2rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+        .card {
+            background: #1e293b; border-radius: 12px; padding: 1.5rem;
+            border: 1px solid #334155; transition: border-color 0.2s;
+        }
+        .card:hover { border-color: #60a5fa; }
+        .card .label { font-size: 0.75rem; text-transform: uppercase; color: #94a3b8; letter-spacing: 0.05em; }
+        .card .value { font-size: 2rem; font-weight: 700; margin-top: 0.25rem; }
+        .card .value.green { color: #4ade80; }
+        .card .value.red { color: #f87171; }
+        .card .value.blue { color: #60a5fa; }
+        .card .value.yellow { color: #fbbf24; }
+        .queues { margin-top: 1rem; }
+        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; }
+        th { background: #334155; padding: 0.75rem 1rem; text-align: left; font-size: 0.75rem; text-transform: uppercase; color: #94a3b8; }
+        td { padding: 0.75rem 1rem; border-top: 1px solid #334155; }
+        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+        .badge.active { background: #065f46; color: #6ee7b7; }
+        .badge.paused { background: #78350f; color: #fcd34d; }
+        .footer { margin-top: 2rem; color: #475569; font-size: 0.8rem; text-align: center; }
+        .login { max-width: 300px; margin: 4rem auto; }
+        .login input { width: 100%; padding: 0.75rem; margin-bottom: 0.75rem; background: #1e293b; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; }
+        .login button { width: 100%; padding: 0.75rem; background: #3b82f6; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
+        .login button:hover { background: #2563eb; }
+        .error { color: #f87171; font-size: 0.85rem; margin-bottom: 0.5rem; }
+        #app { display: none !important; }
+        #app.visible { display: block !important; }
+    </style>
+</head>
+<body>
+    <!-- Login form -->
+    <div id="login-form" class="login">
+        <h1>GQM Custom Dashboard</h1>
+        <p class="subtitle">Sign in to continue</p>
+        <div id="login-error" class="error"></div>
+        <input type="text" id="username" placeholder="Username" value="admin">
+        <input type="password" id="password" placeholder="Password">
+        <button id="login-btn">Sign In</button>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="app">
+        <h1>GQM Custom Dashboard</h1>
+        <p class="subtitle">This is a custom dashboard example. Edit the files in this directory to build your own UI.</p>
+
+        <div class="grid" id="stats-grid"></div>
+
+        <div class="queues">
+            <h2 style="font-size: 1.1rem; margin-bottom: 0.75rem;">Queues</h2>
+            <table>
+                <thead><tr><th>Name</th><th>Ready</th><th>Processing</th><th>Dead Letter</th><th>Status</th></tr></thead>
+                <tbody id="queue-body"><tr><td colspan="5" style="color:#94a3b8">Loading...</td></tr></tbody>
+            </table>
+        </div>
+
+        <div class="footer">
+            Custom dashboard powered by GQM REST API &middot;
+            <a href="/health" style="color:#60a5fa">Health</a>
+        </div>
+    </div>
+
+    <script>
+        // --- Auth ---
+        var basePath = '';
+
+        function apiGet(path) {
+            return fetch(basePath + path, { credentials: 'same-origin' }).then(function(r) {
+                if (r.status === 401) { showLogin(); return Promise.reject('unauthorized'); }
+                return r.json();
+            });
+        }
+
+        function doLogin() {
+            var u = document.getElementById('username').value;
+            var p = document.getElementById('password').value;
+            fetch(basePath + '/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-GQM-CSRF': '1' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ username: u, password: p })
+            }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+            .then(function(res) {
+                if (!res.ok) {
+                    document.getElementById('login-error').textContent = res.data.error || 'Login failed';
+                    return;
+                }
+                showApp();
+            });
+        }
+
+        function showLogin() {
+            document.getElementById('login-form').style.display = '';
+            document.getElementById('app').classList.remove('visible');
+        }
+
+        function showApp() {
+            document.getElementById('login-form').style.display = 'none';
+            document.getElementById('app').classList.add('visible');
+            loadStats();
+            loadQueues();
+            setInterval(function() { loadStats(); loadQueues(); }, 5000);
+        }
+
+        // --- Stats ---
+        function loadStats() {
+            apiGet('/api/v1/stats').then(function(resp) {
+                var d = resp.data || {};
+                document.getElementById('stats-grid').innerHTML =
+                    statCard('Queues', d.queues, 'blue') +
+                    statCard('Workers', d.workers, 'blue') +
+                    statCard('Ready', d.ready, 'yellow') +
+                    statCard('Processing', d.processing, 'blue') +
+                    statCard('Completed', d.completed, 'green') +
+                    statCard('Dead Letter', d.dead_letter, 'red') +
+                    statCard('Processed', d.processed_total, 'green') +
+                    statCard('Failed', d.failed_total, 'red');
+            }).catch(function() {});
+        }
+
+        function statCard(label, value, color) {
+            return '<div class="card"><div class="label">' + label +
+                '</div><div class="value ' + (color || '') + '">' + (value != null ? value : 0) + '</div></div>';
+        }
+
+        // --- Queues ---
+        function loadQueues() {
+            apiGet('/api/v1/queues').then(function(resp) {
+                var qs = resp.data || [];
+                var body = document.getElementById('queue-body');
+                if (!qs.length) { body.innerHTML = '<tr><td colspan="5" style="color:#94a3b8">No queues</td></tr>'; return; }
+                body.innerHTML = qs.map(function(q) {
+                    var status = q.paused ? '<span class="badge paused">Paused</span>' : '<span class="badge active">Active</span>';
+                    return '<tr><td>' + q.name + '</td><td>' + (q.ready || 0) + '</td><td>' +
+                        (q.processing || 0) + '</td><td>' + (q.dead_letter || 0) + '</td><td>' + status + '</td></tr>';
+                }).join('');
+            }).catch(function() {});
+        }
+
+        // --- Init ---
+        document.getElementById('login-btn').addEventListener('click', doLogin);
+        document.getElementById('password').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin(); });
+
+        // Check if already authenticated.
+        apiGet('/auth/me').then(function() { showApp(); }).catch(function() { showLogin(); });
+    </script>
+</body>
+</html>

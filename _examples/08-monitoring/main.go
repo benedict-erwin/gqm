@@ -20,7 +20,7 @@
 // Login: admin / secret123
 // API key: X-API-Key: gqm_ak_monitoring_example_key_do_not_use_in_production
 //
-// Prerequisites: Redis on localhost:6379 (or set GQM_REDIS_ADDR)
+// Prerequisites: Redis on localhost:6379 (or set GQM_TEST_REDIS_ADDR)
 package main
 
 import (
@@ -37,7 +37,7 @@ import (
 )
 
 func main() {
-	redisAddr := envOr("GQM_REDIS_ADDR", "localhost:6379")
+	redisAddr := envOr("GQM_TEST_REDIS_ADDR", "localhost:6379")
 
 	// Hash password for the admin user.
 	hash, err := bcrypt.GenerateFromPassword([]byte("secret123"), bcrypt.DefaultCost)
@@ -51,8 +51,8 @@ func main() {
 		gqm.WithLogLevel("info"),
 
 		// ── Monitoring ────────────────────────────────────────
-		gqm.WithAPI(true, ":8080"),   // enable HTTP API on port 8080
-		gqm.WithDashboard(true),       // enable embedded web dashboard
+		gqm.WithAPI(true, ":8080"), // enable HTTP API on port 8080
+		gqm.WithDashboard(true),    // enable embedded web dashboard
 
 		// ── Authentication ────────────────────────────────────
 		gqm.WithAuthEnabled(true),

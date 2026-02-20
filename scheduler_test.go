@@ -286,3 +286,96 @@ func TestEnqueueCronJob_SkipUpdatesSchedule(t *testing.T) {
 		t.Error("NextRun should be set after skip")
 	}
 }
+
+func TestCronLock_Contention(t *testing.T) {
+	skipWithoutRedis(t)
+
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+
+	// Create two Redis clients sharing the same prefix so they access the same keys.
+	rc1, err := NewRedisClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("creating redis client 1: %v", err)
+	}
+	rc2, err := NewRedisClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("creating redis client 2: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupRedis(t, prefix)
+		rc1.Close()
+		rc2.Close()
+	})
+
+	sr := newScriptRegistry()
+	if err := sr.load(); err != nil {
+		t.Fatalf("loading scripts: %v", err)
+	}
+
+	// Build two Server structs with distinct serverIDs.
+	s1 := &Server{
+		cfg:            &serverConfig{globalTimeout: 30 * time.Minute, gracePeriod: 10 * time.Second},
+		rc:             rc1,
+		scripts:        sr,
+		handlers:       make(map[string]Handler),
+		handlerConfigs: make(map[string]*handlerConfig),
+		jobTypePool:    make(map[string]string),
+		poolNames:      make(map[string]bool),
+		cronEntries:    make(map[string]*CronEntry),
+		logger:         slog.Default(),
+		serverID:       "instance-1",
+	}
+	s2 := &Server{
+		cfg:            &serverConfig{globalTimeout: 30 * time.Minute, gracePeriod: 10 * time.Second},
+		rc:             rc2,
+		scripts:        sr,
+		handlers:       make(map[string]Handler),
+		handlerConfigs: make(map[string]*handlerConfig),
+		jobTypePool:    make(map[string]string),
+		poolNames:      make(map[string]bool),
+		cronEntries:    make(map[string]*CronEntry),
+		logger:         slog.Default(),
+		serverID:       "instance-2",
+	}
+
+	se1 := newSchedulerEngine(s1)
+	se2 := newSchedulerEngine(s2)
+
+	ctx := context.Background()
+	entryID := "test-contention"
+
+	// Both engines try to acquire the same cron lock.
+	got1 := se1.acquireCronLock(ctx, entryID)
+	got2 := se2.acquireCronLock(ctx, entryID)
+
+	// Exactly one should succeed.
+	if got1 == got2 {
+		t.Fatalf("both engines returned %v; exactly one should acquire the lock", got1)
+	}
+
+	// Identify winner and loser.
+	var winner, loser *schedulerEngine
+	if got1 {
+		winner = se1
+		loser = se2
+	} else {
+		winner = se2
+		loser = se1
+	}
+
+	// Loser cannot acquire the lock while it is held.
+	if loser.acquireCronLock(ctx, entryID) {
+		t.Error("loser acquired the lock while it is still held by winner")
+	}
+
+	// Winner releases the lock.
+	winner.releaseCronLock(ctx, entryID)
+
+	// After release, the loser should be able to acquire it.
+	if !loser.acquireCronLock(ctx, entryID) {
+		t.Error("loser should acquire the lock after winner releases it")
+	}
+
+	// Clean up: release the lock held by loser.
+	loser.releaseCronLock(ctx, entryID)
+}

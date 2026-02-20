@@ -312,3 +312,111 @@ func TestRetryDelay(t *testing.T) {
 		})
 	}
 }
+
+func TestPoolRetryDelay_Exponential(t *testing.T) {
+	rp := &RetryPolicy{
+		Backoff:     BackoffExponential,
+		BackoffBase: 2 * time.Second,
+		BackoffMax:  30 * time.Second,
+	}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	tests := []struct {
+		retryCount int
+		want       time.Duration
+	}{
+		{1, 2 * time.Second},
+		{2, 4 * time.Second},
+		{3, 8 * time.Second},
+		{4, 16 * time.Second},
+		{5, 30 * time.Second}, // capped at max
+		{10, 30 * time.Second},
+	}
+	for _, tt := range tests {
+		got := p.poolRetryDelay(rp, tt.retryCount)
+		if got != tt.want {
+			t.Errorf("exponential(%d) = %v, want %v", tt.retryCount, got, tt.want)
+		}
+	}
+}
+
+func TestPoolRetryDelay_ExponentialDefaultBase(t *testing.T) {
+	rp := &RetryPolicy{Backoff: BackoffExponential}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	got := p.poolRetryDelay(rp, 1)
+	if got != defaultRetryDelay {
+		t.Errorf("got %v, want default %v", got, defaultRetryDelay)
+	}
+}
+
+func TestPoolRetryDelay_Custom(t *testing.T) {
+	rp := &RetryPolicy{
+		Backoff:   BackoffCustom,
+		Intervals: []int{5, 15, 60},
+	}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	tests := []struct {
+		retryCount int
+		want       time.Duration
+	}{
+		{1, 5 * time.Second},
+		{2, 15 * time.Second},
+		{3, 60 * time.Second},
+		{4, 60 * time.Second}, // clamps to last
+	}
+	for _, tt := range tests {
+		got := p.poolRetryDelay(rp, tt.retryCount)
+		if got != tt.want {
+			t.Errorf("custom(%d) = %v, want %v", tt.retryCount, got, tt.want)
+		}
+	}
+}
+
+func TestPoolRetryDelay_CustomEmptyIntervals(t *testing.T) {
+	rp := &RetryPolicy{
+		Backoff:     BackoffCustom,
+		Intervals:   nil,
+		BackoffBase: 10 * time.Second,
+	}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	got := p.poolRetryDelay(rp, 1)
+	if got != 10*time.Second {
+		t.Errorf("got %v, want 10s", got)
+	}
+}
+
+func TestPoolRetryDelay_CustomNoIntervalsNoBase(t *testing.T) {
+	rp := &RetryPolicy{Backoff: BackoffCustom}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	got := p.poolRetryDelay(rp, 1)
+	if got != defaultRetryDelay {
+		t.Errorf("got %v, want default %v", got, defaultRetryDelay)
+	}
+}
+
+func TestPoolRetryDelay_Fixed(t *testing.T) {
+	rp := &RetryPolicy{
+		Backoff:     BackoffFixed,
+		BackoffBase: 7 * time.Second,
+	}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	got := p.poolRetryDelay(rp, 3)
+	if got != 7*time.Second {
+		t.Errorf("got %v, want 7s", got)
+	}
+}
+
+func TestPoolRetryDelay_FixedNoBase(t *testing.T) {
+	rp := &RetryPolicy{Backoff: BackoffFixed}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	got := p.poolRetryDelay(rp, 1)
+	if got != defaultRetryDelay {
+		t.Errorf("got %v, want default %v", got, defaultRetryDelay)
+	}
+}

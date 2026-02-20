@@ -580,3 +580,183 @@ func TestDequeue_PausedQueueFallsThrough(t *testing.T) {
 		t.Errorf("high queue len = %d, want 1", highLen)
 	}
 }
+
+func TestCancelJob_Deferred(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	// Create parent and deferred child.
+	rdb.HSet(ctx, s.rc.Key("job", "parent-1"),
+		"id", "parent-1", "type", "test", "queue", "default", "status", "processing")
+	rdb.HSet(ctx, s.rc.Key("job", "child-1"),
+		"id", "child-1", "type", "test", "queue", "default", "status", "deferred")
+	rdb.SAdd(ctx, s.rc.Key("deferred"), "child-1")
+	rdb.SAdd(ctx, s.rc.Key("job", "child-1", "pending_deps"), "parent-1")
+	rdb.SAdd(ctx, s.rc.Key("job", "parent-1", "dependents"), "child-1")
+
+	err := s.CancelJob(ctx, "child-1")
+	if err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+
+	// Verify status changed.
+	status, _ := rdb.HGet(ctx, s.rc.Key("job", "child-1"), "status").Result()
+	if status != StatusCanceled {
+		t.Errorf("status = %q, want canceled", status)
+	}
+}
+
+func TestCancelJob_NotFound(t *testing.T) {
+	s, _ := testAdminServer(t)
+	ctx := context.Background()
+
+	err := s.CancelJob(ctx, "nonexistent-cancel")
+	if err != ErrJobNotFound {
+		t.Errorf("expected ErrJobNotFound, got %v", err)
+	}
+}
+
+func TestDeleteJob_Completed(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	rdb.HSet(ctx, s.rc.Key("job", "del-comp-1"),
+		"id", "del-comp-1", "type", "test", "queue", "default", "status", "completed")
+	rdb.ZAdd(ctx, s.rc.Key("queue", "default", "completed"),
+		redis.Z{Score: float64(time.Now().Unix()), Member: "del-comp-1"})
+
+	err := s.DeleteJob(ctx, "del-comp-1")
+	if err != nil {
+		t.Fatalf("DeleteJob: %v", err)
+	}
+
+	// Verify deleted.
+	exists, _ := rdb.Exists(ctx, s.rc.Key("job", "del-comp-1")).Result()
+	if exists != 0 {
+		t.Error("job should be deleted")
+	}
+}
+
+func TestDeleteJob_DeadLetter(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	rdb.HSet(ctx, s.rc.Key("job", "del-dl-1"),
+		"id", "del-dl-1", "type", "test", "queue", "default", "status", "dead_letter")
+	rdb.ZAdd(ctx, s.rc.Key("queue", "default", "dead_letter"),
+		redis.Z{Score: float64(time.Now().Unix()), Member: "del-dl-1"})
+
+	err := s.DeleteJob(ctx, "del-dl-1")
+	if err != nil {
+		t.Fatalf("DeleteJob: %v", err)
+	}
+}
+
+func TestRetryJob_EmptyQueue(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	// Job with empty queue field.
+	rdb.HSet(ctx, s.rc.Key("job", "retry-empty-q"),
+		"id", "retry-empty-q", "type", "test", "queue", "", "status", "dead_letter")
+	rdb.ZAdd(ctx, s.rc.Key("queue", "default", "dead_letter"),
+		redis.Z{Score: float64(time.Now().Unix()), Member: "retry-empty-q"})
+
+	err := s.RetryJob(ctx, "retry-empty-q")
+	if err != nil {
+		t.Fatalf("RetryJob: %v", err)
+	}
+}
+
+func TestTriggerCron_WithTimeoutAndMaxRetry(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	entry := map[string]any{
+		"id":        "custom",
+		"job_type":  "job.custom",
+		"queue":     "special",
+		"timeout":   120,
+		"max_retry": 5,
+		"enabled":   true,
+	}
+	data, _ := json.Marshal(entry)
+	rdb.HSet(ctx, s.rc.Key("cron", "entries"), "custom", string(data))
+
+	jobID, err := s.TriggerCron(ctx, "custom")
+	if err != nil {
+		t.Fatalf("TriggerCron: %v", err)
+	}
+
+	timeout, _ := rdb.HGet(ctx, s.rc.Key("job", jobID), "timeout").Result()
+	if timeout != "120" {
+		t.Errorf("timeout = %q, want 120", timeout)
+	}
+	maxRetry, _ := rdb.HGet(ctx, s.rc.Key("job", jobID), "max_retry").Result()
+	if maxRetry != "5" {
+		t.Errorf("max_retry = %q, want 5", maxRetry)
+	}
+}
+
+func TestSetCronEnabled_InMemoryUpdate(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	// Register a cron entry in-memory.
+	s.cronEntries["mem-test"] = &CronEntry{
+		ID:      "mem-test",
+		Enabled: true,
+	}
+
+	// Also register in Redis.
+	entry := map[string]any{"id": "mem-test", "enabled": true}
+	data, _ := json.Marshal(entry)
+	rdb.HSet(ctx, s.rc.Key("cron", "entries"), "mem-test", string(data))
+
+	if err := s.DisableCron(ctx, "mem-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// In-memory entry should be updated.
+	if s.cronEntries["mem-test"].Enabled {
+		t.Error("in-memory entry should be disabled")
+	}
+}
+
+func TestDisableCron_NotFound(t *testing.T) {
+	s, _ := testAdminServer(t)
+	ctx := context.Background()
+
+	err := s.DisableCron(ctx, "nonexistent-disable")
+	if err == nil {
+		t.Error("expected error for nonexistent cron entry")
+	}
+}
+
+func TestCancelJob_EmptyQueue(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	rdb.HSet(ctx, s.rc.Key("job", "cancel-emptyq"),
+		"id", "cancel-emptyq", "type", "test", "queue", "", "status", "ready")
+	rdb.LPush(ctx, s.rc.Key("queue", "default", "ready"), "cancel-emptyq")
+
+	err := s.CancelJob(ctx, "cancel-emptyq")
+	if err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+}
+
+func TestDeleteJob_EmptyQueue(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	rdb.HSet(ctx, s.rc.Key("job", "del-emptyq"),
+		"id", "del-emptyq", "type", "test", "queue", "", "status", "ready")
+	rdb.LPush(ctx, s.rc.Key("queue", "default", "ready"), "del-emptyq")
+
+	err := s.DeleteJob(ctx, "del-emptyq")
+	if err != nil {
+		t.Fatalf("DeleteJob: %v", err)
+	}
+}

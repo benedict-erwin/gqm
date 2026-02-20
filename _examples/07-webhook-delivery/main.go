@@ -16,7 +16,7 @@
 //
 //	go run ./_examples/07-webhook-delivery
 //
-// Prerequisites: Redis on localhost:6379 (or set GQM_REDIS_ADDR)
+// Prerequisites: Redis on localhost:6379 (or set GQM_TEST_REDIS_ADDR)
 package main
 
 import (
@@ -32,7 +32,7 @@ import (
 )
 
 func main() {
-	redisAddr := envOr("GQM_REDIS_ADDR", "localhost:6379")
+	redisAddr := envOr("GQM_TEST_REDIS_ADDR", "localhost:6379")
 
 	client, err := gqm.NewClient(gqm.WithRedisAddr(redisAddr))
 	if err != nil {
@@ -57,9 +57,9 @@ func main() {
 	ctx := context.Background()
 
 	webhooks := []struct {
-		eventID  string
+		eventID   string
 		eventType string
-		url      string
+		url       string
 	}{
 		{"evt_001", "order.created", "https://partner-a.example.com/hooks"},
 		{"evt_002", "payment.completed", "https://partner-b.example.com/webhook"},
@@ -80,8 +80,8 @@ func main() {
 			"body":       map[string]any{"event": wh.eventType, "id": wh.eventID},
 		},
 			gqm.Queue("webhook:deliver"),
-			gqm.JobID(jobID),       // deterministic ID for idempotency
-			gqm.Unique(),           // prevent duplicate enqueue
+			gqm.JobID(jobID), // deterministic ID for idempotency
+			gqm.Unique(),     // prevent duplicate enqueue
 			gqm.MaxRetry(8),
 			// Webhook retry schedule: 10s, 30s, 1m, 5m, 15m, 30m, 1h, 2h
 			gqm.RetryIntervals(10, 30, 60, 300, 900, 1800, 3600, 7200),

@@ -20,6 +20,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -27,41 +28,47 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(0)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printUsage(stdout)
+		return 0
 	}
 
-	switch os.Args[1] {
+	switch args[0] {
 	case "init":
-		runInit(os.Args[2:])
+		return runInit(args[1:], stdout, stderr)
 	case "dashboard":
-		runDashboard(os.Args[2:])
+		return runDashboard(args[1:], stdout, stderr)
 	case "set-password", "reset-password":
-		runSetPassword(os.Args[2:])
+		return runSetPassword(args[1:], stdout, stderr)
 	case "add-api-key":
-		runAddAPIKey(os.Args[2:])
+		return runAddAPIKey(args[1:], stdout, stderr)
 	case "revoke-api-key":
-		runRevokeAPIKey(os.Args[2:])
+		return runRevokeAPIKey(args[1:], stdout, stderr)
 	case "hash-password":
-		runHashPassword(os.Args[2:])
+		return runHashPassword(args[1:], stdout, stderr)
 	case "generate-api-key":
-		runGenerateAPIKey(os.Args[2:])
+		return runGenerateAPIKey(args[1:], stdout, stderr)
 	case "tui":
-		runTUI(os.Args[2:])
+		return runTUI(args[1:], stdout, stderr)
 	case "version":
-		fmt.Printf("gqm %s\n", version)
+		fmt.Fprintf(stdout, "gqm %s\n", version)
+		return 0
 	case "help", "-h", "--help":
-		printUsage()
+		printUsage(stdout)
+		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "gqm: unknown command %q\n\n", os.Args[1])
-		printUsage()
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gqm: unknown command %q\n\n", args[0])
+		printUsage(stderr)
+		return 1
 	}
 }
 
-func printUsage() {
-	fmt.Print(`GQM — Go Queue Manager CLI
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `GQM — Go Queue Manager CLI
 
 Usage:
   gqm <command> [arguments]

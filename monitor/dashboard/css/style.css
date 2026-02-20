@@ -65,8 +65,11 @@ pre {
 
 /* --- Layout (Sidebar + Content) --- */
 #layout {
-    display: flex;
+    display: none;
     min-height: 100vh;
+}
+#layout.visible {
+    display: flex;
 }
 
 #sidebar {

@@ -41,8 +41,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create server from config.
-	s, err := gqm.NewServerFromConfig(cfg)
+	// Create server from config — override Redis addr from env if set.
+	var serverOpts []gqm.ServerOption
+	if addr := os.Getenv("GQM_TEST_REDIS_ADDR"); addr != "" {
+		serverOpts = append(serverOpts, gqm.WithServerRedis(addr))
+	}
+	s, err := gqm.NewServerFromConfig(cfg, serverOpts...)
 	if err != nil {
 		slog.Error("failed to create server", "error", err)
 		os.Exit(1)
@@ -112,7 +116,10 @@ func main() {
 	go func() {
 		time.Sleep(2 * time.Second)
 
-		addr := cfg.Redis.Addr
+		addr := os.Getenv("GQM_TEST_REDIS_ADDR")
+		if addr == "" {
+			addr = cfg.Redis.Addr
+		}
 		if addr == "" {
 			addr = "localhost:6379"
 		}

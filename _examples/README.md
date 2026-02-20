@@ -2,7 +2,7 @@
 
 Runnable examples demonstrating GQM features. Each example is self-contained and can be run independently.
 
-**Prerequisites:** Redis on `localhost:6379` (or set `GQM_REDIS_ADDR`).
+**Prerequisites:** Redis on `localhost:6379` (or set `GQM_TEST_REDIS_ADDR`).
 
 ```bash
 # Start Redis (if not already running)
@@ -22,6 +22,8 @@ docker compose up -d
 | 07 | [Webhook Delivery](07-webhook-delivery/) | Unique, JobID, custom retry intervals | `go run ./_examples/07-webhook-delivery` |
 | 08 | [Monitoring](08-monitoring/) | Dashboard, HTTP API, auth, API keys | `go run ./_examples/08-monitoring` |
 | 09 | [Dev Server](09-dev-server/) | All features, dummy data, DAG patterns | `go run ./_examples/09-dev-server` |
+| 10 | [Advanced Features](10-advanced-features/) | ErrSkipRetry, IsFailure, middleware, callbacks, batch | `go run ./_examples/10-advanced-features` |
+| 11 | [Custom Dashboard](11-custom-dashboard/) | WithDashboardDir, custom UI | `go run ./_examples/11-custom-dashboard` |
 
 > **Note:** Examples 06 and 09/config load a `gqm.yaml` file, so run them from their directory (`cd` first).
 
@@ -42,4 +44,5 @@ docker compose up -d
 | Unique / JobID | 07 |
 | Custom retry intervals | 07 |
 | Dashboard + auth | 08, 09 |
+| Custom dashboard | 11 |
 | API keys | 08, 09 |

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/benedict-erwin/gqm/monitor"
+	"github.com/redis/go-redis/v9"
 )
 
 // AuthUser represents a user for the monitoring API.
@@ -71,6 +72,17 @@ func WithServerRedis(addr string) ServerOption {
 func WithServerRedisOpts(opts ...RedisOption) ServerOption {
 	return func(cfg *serverConfig) {
 		cfg.redisOpts = append(cfg.redisOpts, opts...)
+	}
+}
+
+// WithServerRedisClient injects a pre-configured *redis.Client for the
+// server. This enables Redis Sentinel or any custom go-redis setup.
+// Connection options (WithServerRedis, etc.) are ignored when this is
+// used; only the key prefix (WithPrefix via WithServerRedisOpts) still
+// applies.
+func WithServerRedisClient(rdb *redis.Client) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.redisOpts = append(cfg.redisOpts, WithRedisClient(rdb))
 	}
 }
 

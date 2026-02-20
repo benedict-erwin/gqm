@@ -56,7 +56,7 @@ GQM.app = {
     showLogin: function() {
         GQM.app.stopPolling();
         GQM.app.authenticated = false;
-        document.getElementById('layout').style.display = 'none';
+        document.getElementById('layout').classList.remove('visible');
         var app = document.getElementById('app');
         // Create login container outside layout
         var container = document.getElementById('login-page');
@@ -87,7 +87,7 @@ GQM.app = {
         // Hide login, show layout
         var loginPage = document.getElementById('login-page');
         if (loginPage) loginPage.style.display = 'none';
-        document.getElementById('layout').style.display = '';
+        document.getElementById('layout').classList.add('visible');
         GQM.app.updateAuthUI();
         window.location.hash = '#/';
         GQM.app.route();

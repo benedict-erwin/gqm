@@ -15,7 +15,7 @@
 //
 //	go run ./_examples/05-multi-tenant
 //
-// Prerequisites: Redis on localhost:6379 (or set GQM_REDIS_ADDR)
+// Prerequisites: Redis on localhost:6379 (or set GQM_TEST_REDIS_ADDR)
 package main
 
 import (
@@ -31,7 +31,7 @@ import (
 )
 
 func main() {
-	redisAddr := envOr("GQM_REDIS_ADDR", "localhost:6379")
+	redisAddr := envOr("GQM_TEST_REDIS_ADDR", "localhost:6379")
 
 	client, err := gqm.NewClient(gqm.WithRedisAddr(redisAddr))
 	if err != nil {
@@ -59,7 +59,7 @@ func main() {
 			"api:standard",
 		},
 		Concurrency:     5,
-		JobTimeout:       10 * time.Second,
+		JobTimeout:      10 * time.Second,
 		DequeueStrategy: gqm.StrategyStrict, // always drain higher-priority queue first
 		RetryPolicy: &gqm.RetryPolicy{
 			MaxRetry:    3,
@@ -79,7 +79,7 @@ func main() {
 			"bg:standard",
 		},
 		Concurrency:     3,
-		JobTimeout:       5 * time.Minute,
+		JobTimeout:      5 * time.Minute,
 		DequeueStrategy: gqm.StrategyWeighted, // weighted round-robin
 		RetryPolicy: &gqm.RetryPolicy{
 			MaxRetry:    5,
@@ -99,7 +99,7 @@ func main() {
 			"notify:push",
 		},
 		Concurrency:     4,
-		JobTimeout:       30 * time.Second,
+		JobTimeout:      30 * time.Second,
 		DequeueStrategy: gqm.StrategyRoundRobin, // fair: rotate across queues
 		RetryPolicy: &gqm.RetryPolicy{
 			MaxRetry:  2,

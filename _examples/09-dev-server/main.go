@@ -24,7 +24,7 @@
 //
 // For YAML config variant, see: config/ subdirectory.
 //
-// Prerequisites: Redis on localhost:6379 (or set GQM_REDIS_ADDR)
+// Prerequisites: Redis on localhost:6379 (or set GQM_TEST_REDIS_ADDR)
 package main
 
 import (
@@ -42,7 +42,7 @@ import (
 func main() {
 	hash, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
 
-	redisAddr := envOr("GQM_REDIS_ADDR", "localhost:6379")
+	redisAddr := envOr("GQM_TEST_REDIS_ADDR", "localhost:6379")
 
 	s, err := gqm.NewServer(
 		gqm.WithServerRedis(redisAddr),

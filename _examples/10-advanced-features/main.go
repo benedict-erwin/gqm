@@ -14,7 +14,7 @@
 //
 //	go run ./_examples/10-advanced-features
 //
-// Prerequisites: Redis on localhost:6379 (or set GQM_REDIS_ADDR)
+// Prerequisites: Redis on localhost:6379 (or set GQM_TEST_REDIS_ADDR)
 package main
 
 import (
@@ -32,7 +32,7 @@ import (
 )
 
 func main() {
-	addr := envOr("GQM_REDIS_ADDR", "localhost:6379")
+	addr := envOr("GQM_TEST_REDIS_ADDR", "localhost:6379")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()

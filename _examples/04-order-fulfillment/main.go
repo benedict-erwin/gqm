@@ -4,13 +4,13 @@
 // After validation, payment and invoice run in parallel, then shipping
 // and notification depend on both completing.
 //
-//	              validate
-//	              /      \
-//	         payment    invoice
-//	              \      /
-//	              shipping
-//	                 |
-//	              notify
+//	     validate
+//	     /      \
+//	payment    invoice
+//	     \      /
+//	     shipping
+//	        |
+//	     notify
 //
 // Features shown:
 //   - DependsOn() with multiple parents (diamond join)
@@ -22,7 +22,7 @@
 //
 //	go run ./_examples/04-order-fulfillment
 //
-// Prerequisites: Redis on localhost:6379 (or set GQM_REDIS_ADDR)
+// Prerequisites: Redis on localhost:6379 (or set GQM_TEST_REDIS_ADDR)
 package main
 
 import (
@@ -38,7 +38,7 @@ import (
 )
 
 func main() {
-	redisAddr := envOr("GQM_REDIS_ADDR", "localhost:6379")
+	redisAddr := envOr("GQM_TEST_REDIS_ADDR", "localhost:6379")
 
 	client, err := gqm.NewClient(gqm.WithRedisAddr(redisAddr))
 	if err != nil {

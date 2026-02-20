@@ -2,13 +2,13 @@
 # Same features as the programmatic variant, but pools/queues/cron/auth defined in YAML.
 
 redis:
-  addr: localhost:6379
+  addr: GQM_TEST_REDIS_ADDR
   db: 0
 
 app:
   timezone: UTC
   log_level: debug
-  global_job_timeout: 1800   # 30 minutes
+  global_job_timeout: 1800 # 30 minutes
   grace_period: 10
   shutdown_timeout: 30
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,23 +11,24 @@ import (
 	"github.com/benedict-erwin/gqm/monitor/dashboard"
 )
 
-func runDashboard(args []string) {
+func runDashboard(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 2 || args[0] != "export" {
-		fmt.Fprintln(os.Stderr, `Usage: gqm dashboard export <dir>
+		fmt.Fprintln(stderr, `Usage: gqm dashboard export <dir>
 
 Export the embedded dashboard files to a directory.
 The directory will be created if it does not exist.`)
-		os.Exit(1)
+		return 1
 	}
 
 	targetDir := args[1]
 
 	if err := exportDashboard(targetDir); err != nil {
-		fmt.Fprintf(os.Stderr, "gqm: export dashboard: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gqm: export dashboard: %v\n", err)
+		return 1
 	}
 
-	fmt.Printf("Dashboard exported to %s\n", targetDir)
+	fmt.Fprintf(stdout, "Dashboard exported to %s\n", targetDir)
+	return 0
 }
 
 func exportDashboard(targetDir string) error {
