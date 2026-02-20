@@ -8,9 +8,10 @@
 -- KEYS[4]: paused set key (e.g., gqm:paused)
 --
 -- ARGV[1]: current timestamp (unix seconds)
--- ARGV[2]: job timeout (seconds) — used as score = now + timeout
+-- ARGV[2]: global timeout (seconds) — fallback if no job/pool timeout
 -- ARGV[3]: worker ID
 -- ARGV[4]: queue name (to check against paused set)
+-- ARGV[5]: pool timeout (seconds, 0 = not set)
 --
 -- Returns: array [job_id, field1, val1, field2, val2, ...] if dequeued,
 --          nil if queue is empty or paused
@@ -27,14 +28,23 @@ end
 
 -- Guard: only process if job status is 'ready'. Prevents resurrecting
 -- canceled/completed jobs whose ID ended up in the ready queue.
--- Also catches missing job hashes (HGET returns false/nil).
+-- Also catches missing job hashes (HMGET returns false/nil for missing keys).
 local job_key = KEYS[3] .. job_id
-local current_status = redis.call('HGET', job_key, 'status')
-if current_status ~= 'ready' then
+local fields = redis.call('HMGET', job_key, 'status', 'timeout')
+if fields[1] ~= 'ready' then
     return nil
 end
 
-local deadline = tonumber(ARGV[1]) + tonumber(ARGV[2])
+-- Resolve timeout hierarchy: job-level > pool-level > global.
+local job_timeout = tonumber(fields[2]) or 0
+local pool_timeout = tonumber(ARGV[5]) or 0
+local timeout = tonumber(ARGV[2])
+if job_timeout > 0 then
+    timeout = job_timeout
+elseif pool_timeout > 0 then
+    timeout = pool_timeout
+end
+local deadline = tonumber(ARGV[1]) + timeout
 redis.call('ZADD', KEYS[2], deadline, job_id)
 
 redis.call('HSET', job_key,

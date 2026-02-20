@@ -118,6 +118,10 @@ func TestRunDashboard_OnlyExport(t *testing.T) {
 }
 
 func TestExportDashboard_ReadOnlyDir(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root user (file permission checks are bypassed by root)")
+	}
+
 	dir := t.TempDir()
 	roDir := filepath.Join(dir, "readonly")
 	os.Mkdir(roDir, 0o555)
@@ -131,6 +135,10 @@ func TestExportDashboard_ReadOnlyDir(t *testing.T) {
 }
 
 func TestExportDashboard_WriteFileError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root user (file permission checks are bypassed by root)")
+	}
+
 	dir := t.TempDir()
 	target := filepath.Join(dir, "locked")
 	// Create the target dir first, then make it read-only.
@@ -146,6 +154,10 @@ func TestExportDashboard_WriteFileError(t *testing.T) {
 }
 
 func TestRunDashboard_ExportError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root user (file permission checks are bypassed by root)")
+	}
+
 	dir := t.TempDir()
 	roDir := filepath.Join(dir, "readonly")
 	os.Mkdir(roDir, 0o555)

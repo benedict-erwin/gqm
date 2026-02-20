@@ -98,29 +98,46 @@ func DecodeJob(data []byte) (*Job, error) {
 }
 
 // ToMap converts a Job to a map suitable for Redis HSET.
+// Zero-value fields are omitted to reduce HSET data transfer.
+// JobFromMap handles missing fields gracefully (parseInt returns 0, map lookup returns "").
 func (j *Job) ToMap() (map[string]any, error) {
 	payloadJSON, err := json.Marshal(j.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("encoding payload: %w", err)
 	}
 
-	m := make(map[string]any, 20)
+	m := make(map[string]any, 12)
 	m["id"] = j.ID
 	m["type"] = j.Type
 	m["queue"] = j.Queue
 	m["payload"] = string(payloadJSON)
 	m["status"] = j.Status
-	m["retry_count"] = j.RetryCount
 	m["max_retry"] = j.MaxRetry
-	m["timeout"] = j.Timeout
 	m["created_at"] = j.CreatedAt
-	m["scheduled_at"] = j.ScheduledAt
-	m["started_at"] = j.StartedAt
-	m["completed_at"] = j.CompletedAt
 
-	// Always include error and worker_id so HSet can clear stale values on retry.
-	m["error"] = j.Error
-	m["worker_id"] = j.WorkerID
+	// Only include non-zero fields. Lua scripts (retry.lua, dequeue.lua, complete.lua)
+	// set these fields directly when needed; no need to pre-populate with zero values.
+	if j.RetryCount != 0 {
+		m["retry_count"] = j.RetryCount
+	}
+	if j.Timeout != 0 {
+		m["timeout"] = j.Timeout
+	}
+	if j.ScheduledAt != 0 {
+		m["scheduled_at"] = j.ScheduledAt
+	}
+	if j.StartedAt != 0 {
+		m["started_at"] = j.StartedAt
+	}
+	if j.CompletedAt != 0 {
+		m["completed_at"] = j.CompletedAt
+	}
+	if j.Error != "" {
+		m["error"] = j.Error
+	}
+	if j.WorkerID != "" {
+		m["worker_id"] = j.WorkerID
+	}
 	if j.Result != nil {
 		m["result"] = string(j.Result)
 	}

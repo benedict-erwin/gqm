@@ -214,6 +214,10 @@ func TestLoadConfigNode_Errors(t *testing.T) {
 }
 
 func TestSaveConfigNode_WriteError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root user (file permission checks are bypassed by root)")
+	}
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "readonly.yaml")
 	// Create the file first so stat succeeds.

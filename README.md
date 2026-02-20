@@ -26,6 +26,8 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 - **CLI tool** — Config management, password hashing, API key generation, dashboard export
 - **TUI monitor** — Terminal UI with live queue/worker/cron monitoring (separate Go module)
 - **Atomic operations** — 12 Lua scripts for race-free Redis state transitions
+- **Redis TLS** — `WithRedisTLS()` option or `redis.tls: true` config for encrypted connections (pass custom `*tls.Config` or `nil` for system defaults)
+- **API rate limiting** — Per-IP token bucket on all API endpoints (default 100 req/s, configurable via `monitoring.api.rate_limit`, `/health` exempt)
 - **Redis Sentinel support** — Inject pre-configured `*redis.Client` via `WithRedisClient()` for Sentinel, Cluster, or custom setups
 - **Minimal dependencies** — Only 3 production deps: go-redis, yaml.v3, x/crypto
 

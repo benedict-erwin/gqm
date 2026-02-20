@@ -239,14 +239,12 @@ func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, map[
 	pausedKey := rc.Key("paused")
 
 	now := time.Now().Unix()
-	// Uses globalTimeout as a conservative initial deadline for the processing set.
-	// The actual job timeout is resolved after fetching job data in processJob,
-	// which then updates the score via ZAddXX if the resolved timeout is shorter.
-	timeout := int64(p.server.cfg.globalTimeout.Seconds())
+	globalTimeout := int64(p.server.cfg.globalTimeout.Seconds())
+	poolTimeout := int64(p.cfg.jobTimeout.Seconds())
 
 	result := p.server.scripts.run(ctx, rc.rdb, "dequeue",
 		[]string{readyKey, processingKey, jobPrefix, pausedKey},
-		now, timeout, p.cfg.name, queue,
+		now, globalTimeout, p.cfg.name, queue, poolTimeout,
 	)
 
 	if result.Err() != nil {
@@ -323,20 +321,9 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 		return
 	}
 
-	// Resolve timeout and create context
+	// Resolve timeout for context deadline. The processing set score was already
+	// set correctly by dequeue.lua using the same timeout hierarchy.
 	timeout := p.server.resolveTimeout(job, p.cfg)
-
-	// Update the processing set deadline with the resolved timeout.
-	// At dequeue time we used globalTimeout as a conservative default
-	// because the job data wasn't available yet. Now that we know the
-	// actual timeout, update the score so stuck job detection fires at
-	// the correct time.
-	if timeout < p.server.cfg.globalTimeout {
-		processingKey := rc.Key("queue", job.Queue, "processing")
-		newDeadline := float64(time.Now().Unix()) + timeout.Seconds()
-		rc.rdb.ZAddXX(ctx, processingKey, redis.Z{Score: newDeadline, Member: job.ID})
-	}
-
 	jobCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -501,10 +488,15 @@ func (p *pool) completeJob(ctx context.Context, job *Job, elapsed time.Duration)
 	processingKey := rc.Key("queue", job.Queue, "processing")
 	completedKey := rc.Key("queue", job.Queue, "completed")
 	jobKey := rc.Key("job", job.ID)
+	dependentsKey := rc.Key("job", job.ID, "dependents")
+	date := time.Now().UTC().Format("2006-01-02")
+	dailyStatsKey := rc.Key("stats", job.Queue, "processed", date)
+	totalStatsKey := rc.Key("stats", job.Queue, "processed_total")
+	const statsTTL = 90 * 24 * 3600 // 90 days in seconds
 
 	result := p.server.scripts.run(ctx, rc.rdb, "complete",
-		[]string{processingKey, completedKey, jobKey},
-		job.ID, now, "", strconv.FormatInt(durationMS, 10),
+		[]string{processingKey, completedKey, jobKey, dependentsKey, dailyStatsKey, totalStatsKey},
+		job.ID, now, "", strconv.FormatInt(durationMS, 10), statsTTL,
 	)
 	if result.Err() != nil {
 		p.logger.Error("failed to complete job in Redis",
@@ -514,7 +506,7 @@ func (p *pool) completeJob(ctx context.Context, job *Job, elapsed time.Duration)
 		return
 	}
 
-	// Check Lua return value: 0 means job was not in processing set (stale/duplicate).
+	// Check Lua return value: 0 = not in processing set, 1 = done, 2 = done + has dependents.
 	val, err := result.Int64()
 	if err != nil || val == 0 {
 		p.logger.Warn("complete script returned 0; job was not in processing set",
@@ -523,22 +515,21 @@ func (p *pool) completeJob(ctx context.Context, job *Job, elapsed time.Duration)
 		return
 	}
 
-	// DAG: resolve dependents after successful completion.
-	promoted, err := resolveDependents(ctx, rc, p.server.scripts, job.ID)
-	if err != nil {
-		p.logger.Error("failed to resolve dependents",
-			"job_id", job.ID,
-			"error", err,
-		)
-	} else if len(promoted) > 0 {
-		p.logger.Info("DAG: promoted dependent jobs to ready",
-			"parent_job_id", job.ID,
-			"promoted", promoted,
-		)
+	// DAG: resolve dependents only if Lua detected the dependents set exists.
+	if val == 2 {
+		promoted, err := resolveDependents(ctx, rc, p.server.scripts, job.ID)
+		if err != nil {
+			p.logger.Error("failed to resolve dependents",
+				"job_id", job.ID,
+				"error", err,
+			)
+		} else if len(promoted) > 0 {
+			p.logger.Info("DAG: promoted dependent jobs to ready",
+				"parent_job_id", job.ID,
+				"promoted", promoted,
+			)
+		}
 	}
-
-	// Stats: increment processed counters (non-blocking).
-	p.incrementStats(ctx, job.Queue, "processed")
 }
 
 // handleFailure evaluates retry policy and either retries or moves to DLQ.
@@ -661,10 +652,15 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 	processingKey := rc.Key("queue", job.Queue, "processing")
 	dlqKey := rc.Key("queue", job.Queue, "dead_letter")
 	jobKey := rc.Key("job", job.ID)
+	dependentsKey := rc.Key("job", job.ID, "dependents")
+	date := time.Now().UTC().Format("2006-01-02")
+	dailyStatsKey := rc.Key("stats", job.Queue, "failed", date)
+	totalStatsKey := rc.Key("stats", job.Queue, "failed_total")
+	const statsTTL = 90 * 24 * 3600 // 90 days in seconds
 
 	result := p.server.scripts.run(ctx, rc.rdb, "deadletter",
-		[]string{processingKey, dlqKey, jobKey},
-		job.ID, now, errMsg,
+		[]string{processingKey, dlqKey, jobKey, dependentsKey, dailyStatsKey, totalStatsKey},
+		job.ID, now, errMsg, statsTTL,
 	)
 	if result.Err() != nil {
 		p.logger.Error("failed to move job to DLQ",
@@ -674,7 +670,7 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 		return
 	}
 
-	// Check Lua return value: 0 means job was not in processing set (stale/duplicate).
+	// Check Lua return value: 0 = not in processing set, 1 = done, 2 = done + has dependents.
 	val, err := result.Int64()
 	if err != nil || val == 0 {
 		p.logger.Warn("deadletter script returned 0; job was not in processing set",
@@ -691,16 +687,15 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 		"error", errMsg,
 	)
 
-	// DAG: propagate failure to dependents.
-	if err := propagateFailure(ctx, rc, p.server.scripts, job.ID); err != nil {
-		p.logger.Error("failed to propagate failure to dependents",
-			"job_id", job.ID,
-			"error", err,
-		)
+	// DAG: propagate failure to dependents only if Lua detected the dependents set exists.
+	if val == 2 {
+		if err := propagateFailure(ctx, rc, p.server.scripts, job.ID); err != nil {
+			p.logger.Error("failed to propagate failure to dependents",
+				"job_id", job.ID,
+				"error", err,
+			)
+		}
 	}
-
-	// Stats: increment failed counters (non-blocking).
-	p.incrementStats(ctx, job.Queue, "failed")
 }
 
 // retryDelay calculates the delay before the next retry attempt.
@@ -825,24 +820,3 @@ func (p *pool) sendHeartbeat(ctx context.Context) {
 	}
 }
 
-// incrementStats updates processed/failed counters for a queue.
-// Uses a pipeline for daily (with 90-day TTL) and cumulative counters.
-// Non-blocking: logs a warning on failure but never fails the job.
-func (p *pool) incrementStats(ctx context.Context, queue, kind string) {
-	rc := p.server.rc
-	date := time.Now().UTC().Format("2006-01-02")
-	dailyKey := rc.Key("stats", queue, kind, date)
-	totalKey := rc.Key("stats", queue, kind+"_total")
-
-	pipe := rc.rdb.Pipeline()
-	pipe.Incr(ctx, dailyKey)
-	pipe.Expire(ctx, dailyKey, 90*24*time.Hour)
-	pipe.Incr(ctx, totalKey)
-	if _, err := pipe.Exec(ctx); err != nil {
-		p.logger.Warn("stats counter update failed",
-			"queue", queue,
-			"kind", kind,
-			"error", err,
-		)
-	}
-}
