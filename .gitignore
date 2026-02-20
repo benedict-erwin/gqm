@@ -39,3 +39,6 @@ Thumbs.db
 .env
 .env.*
 .claude/settings.local.json
+
+# Benchmark
+.benchmark/*
