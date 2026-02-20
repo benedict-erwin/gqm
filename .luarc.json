@@ -1,0 +1,13 @@
+{
+  "diagnostics.globals": [
+    "redis",
+    "KEYS",
+    "ARGV",
+    "cjson",
+    "cmsgpack",
+    "tonumber",
+    "tostring",
+    "type",
+    "unpack"
+  ]
+}

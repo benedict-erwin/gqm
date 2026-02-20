@@ -488,7 +488,7 @@ func TestDequeueFromQueue_SkipsPaused(t *testing.T) {
 	rdb.LPush(ctx, s.rc.Key("queue", "default", "ready"), "j1")
 
 	// Dequeue should succeed before pause
-	jobID, err := p.dequeueFromQueue(ctx, "default")
+	jobID, _, err := p.dequeueFromQueue(ctx, "default")
 	if err != nil {
 		t.Fatalf("dequeueFromQueue: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestDequeueFromQueue_SkipsPaused(t *testing.T) {
 	}
 
 	// Dequeue should return empty (skipped due to pause)
-	jobID, err = p.dequeueFromQueue(ctx, "default")
+	jobID, _, err = p.dequeueFromQueue(ctx, "default")
 	if err != nil {
 		t.Fatalf("dequeueFromQueue after pause: %v", err)
 	}
@@ -527,7 +527,7 @@ func TestDequeueFromQueue_SkipsPaused(t *testing.T) {
 	}
 
 	// Dequeue should succeed again
-	jobID, err = p.dequeueFromQueue(ctx, "default")
+	jobID, _, err = p.dequeueFromQueue(ctx, "default")
 	if err != nil {
 		t.Fatalf("dequeueFromQueue after resume: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestDequeue_PausedQueueFallsThrough(t *testing.T) {
 	}
 
 	// Dequeue should skip "high" and dequeue from "low"
-	jobID, queue, err := p.dequeue(ctx)
+	jobID, queue, _, err := p.dequeue(ctx)
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}

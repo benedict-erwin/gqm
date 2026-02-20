@@ -3,6 +3,7 @@ package gqm
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -10,7 +11,8 @@ import (
 
 // Client is used to enqueue jobs into the queue system.
 type Client struct {
-	rc *RedisClient
+	rc         *RedisClient
+	knownQueues sync.Map // tracks queues already registered via SADD
 }
 
 // NewClient creates a new Client with the given Redis options.
@@ -73,12 +75,13 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, payload Payload, o
 	}
 
 	queueKey := c.rc.Key("queue", job.Queue, "ready")
-	queuesKey := c.rc.Key("queues")
 
 	pipe := c.rc.rdb.Pipeline()
 	pipe.HSet(ctx, jobKey, jobMap)
 	pipe.LPush(ctx, queueKey, job.ID)
-	pipe.SAdd(ctx, queuesKey, job.Queue)
+	if _, loaded := c.knownQueues.LoadOrStore(job.Queue, struct{}{}); !loaded {
+		pipe.SAdd(ctx, c.rc.Key("queues"), job.Queue)
+	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		// Clean up orphaned key from HSetNX if pipeline fails.
 		if job.unique {
@@ -326,13 +329,15 @@ func (c *Client) EnqueueBatch(ctx context.Context, items []BatchItem) ([]*Job, e
 		pipe.LPush(ctx, queueKey, job.ID)
 	}
 
-	// Single SAdd for all unique queues.
-	if len(uniqueQueues) > 0 {
-		queues := make([]any, 0, len(uniqueQueues))
-		for q := range uniqueQueues {
-			queues = append(queues, q)
+	// Single SAdd for queues not yet cached.
+	newQueues := make([]any, 0, len(uniqueQueues))
+	for q := range uniqueQueues {
+		if _, loaded := c.knownQueues.LoadOrStore(q, struct{}{}); !loaded {
+			newQueues = append(newQueues, q)
 		}
-		pipe.SAdd(ctx, queuesKey, queues...)
+	}
+	if len(newQueues) > 0 {
+		pipe.SAdd(ctx, queuesKey, newQueues...)
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {

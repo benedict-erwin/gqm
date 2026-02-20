@@ -1,16 +1,24 @@
 -- dequeue.lua
--- Atomically moves a job from the ready queue to the processing sorted set
--- and updates the job hash status.
+-- Atomically moves a job from the ready queue to the processing sorted set,
+-- updates the job hash status, and returns the full job data.
 --
 -- KEYS[1]: ready queue list (e.g., gqm:queue:default:ready)
 -- KEYS[2]: processing sorted set (e.g., gqm:queue:default:processing)
 -- KEYS[3]: job hash key prefix (e.g., gqm:job:)
+-- KEYS[4]: paused set key (e.g., gqm:paused)
 --
 -- ARGV[1]: current timestamp (unix seconds)
 -- ARGV[2]: job timeout (seconds) — used as score = now + timeout
 -- ARGV[3]: worker ID
+-- ARGV[4]: queue name (to check against paused set)
 --
--- Returns: job ID if dequeued, nil if queue is empty
+-- Returns: array [job_id, field1, val1, field2, val2, ...] if dequeued,
+--          nil if queue is empty or paused
+
+-- Check if queue is paused before attempting dequeue.
+if redis.call('SISMEMBER', KEYS[4], ARGV[4]) == 1 then
+    return nil
+end
 
 local job_id = redis.call('RPOP', KEYS[1])
 if not job_id then
@@ -34,4 +42,7 @@ redis.call('HSET', job_key,
     'started_at', ARGV[1],
     'worker_id', ARGV[3])
 
-return job_id
+-- Return job_id followed by all hash fields (already includes updated status).
+local data = redis.call('HGETALL', job_key)
+table.insert(data, 1, job_id)
+return data

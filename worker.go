@@ -18,7 +18,7 @@ import (
 
 const (
 	// dequeueTimeout is the BLMOVE/poll timeout before looping.
-	dequeueTimeout = 5 * time.Second
+	dequeueTimeout = 1 * time.Second
 
 	// maxAbandonedHandlers is the per-pool limit for leaked handler goroutines.
 	// When reached, the pool logs a critical warning on every new abandon.
@@ -43,6 +43,10 @@ type pool struct {
 	// abandonedHandlers counts handler goroutines that were abandoned after
 	// grace period timeout. These goroutines may still be running.
 	abandonedHandlers atomic.Int64
+
+	// lastDequeueErrLog is the unix timestamp (seconds) of the last dequeue
+	// error log. Used for rate-limiting to avoid log spam during Redis outages.
+	lastDequeueErrLog atomic.Int64
 }
 
 func newPool(cfg *poolConfig, server *Server) *pool {
@@ -97,12 +101,18 @@ func (p *pool) workerLoop(ctx context.Context, workerIdx int) {
 		default:
 		}
 
-		jobID, queue, err := p.dequeue(ctx)
+		jobID, queue, data, err := p.dequeue(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			// Dequeue timeout or transient error — loop again
+			// Rate-limited error logging: at most once per 3 seconds per pool.
+			now := time.Now().Unix()
+			if last := p.lastDequeueErrLog.Load(); now-last >= 3 {
+				if p.lastDequeueErrLog.CompareAndSwap(last, now) {
+					p.logger.Error("dequeue error", "worker", workerIdx, "error", err)
+				}
+			}
 			continue
 		}
 		if jobID == "" {
@@ -113,7 +123,7 @@ func (p *pool) workerLoop(ctx context.Context, workerIdx int) {
 		// in-flight jobs can complete during graceful shutdown but won't
 		// block forever if Redis becomes unreachable.
 		jobCtx, jobCancel := context.WithTimeout(context.Background(), p.server.cfg.shutdownTimeout)
-		p.processJob(jobCtx, workerIdx, jobID, queue)
+		p.processJob(jobCtx, workerIdx, jobID, queue, data)
 		jobCancel()
 	}
 }
@@ -121,19 +131,19 @@ func (p *pool) workerLoop(ctx context.Context, workerIdx int) {
 // dequeue attempts to dequeue a job from any of the pool's queues using the
 // configured dequeue strategy. If the selected queue is empty, remaining queues
 // are tried as fallback. If all queues are empty, sleeps for dequeueTimeout.
-func (p *pool) dequeue(ctx context.Context) (string, string, error) {
+func (p *pool) dequeue(ctx context.Context) (string, string, map[string]string, error) {
 	queues := p.cfg.queues
 
 	// Build queue visit order based on strategy
 	order := p.dequeueOrder()
 
 	for _, idx := range order {
-		jobID, err := p.dequeueFromQueue(ctx, queues[idx])
+		jobID, data, err := p.dequeueFromQueue(ctx, queues[idx])
 		if err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 		if jobID != "" {
-			return jobID, queues[idx], nil
+			return jobID, queues[idx], data, nil
 		}
 	}
 
@@ -142,9 +152,9 @@ func (p *pool) dequeue(ctx context.Context) (string, string, error) {
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return "", "", ctx.Err()
+		return "", "", nil, ctx.Err()
 	case <-timer.C:
-		return "", "", nil
+		return "", "", nil, nil
 	}
 }
 
@@ -220,23 +230,13 @@ func (p *pool) weightedOrder(n int) []int {
 
 // dequeueFromQueue attempts to atomically dequeue a single job from the given queue.
 // Returns ("", nil) if the queue is empty or the queue is paused.
-func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, error) {
+func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, map[string]string, error) {
 	rc := p.server.rc
-
-	// Check if queue is paused (fail-open on error)
-	paused, err := rc.rdb.SIsMember(ctx, rc.Key("paused"), queue).Result()
-	if err != nil {
-		if ctx.Err() == nil {
-			p.logger.Warn("failed to check pause status", "queue", queue, "error", err)
-		}
-	}
-	if paused {
-		return "", nil
-	}
 
 	readyKey := rc.Key("queue", queue, "ready")
 	processingKey := rc.Key("queue", queue, "processing")
 	jobPrefix := rc.Key("job") + ":"
+	pausedKey := rc.Key("paused")
 
 	now := time.Now().Unix()
 	// Uses globalTimeout as a conservative initial deadline for the processing set.
@@ -245,29 +245,39 @@ func (p *pool) dequeueFromQueue(ctx context.Context, queue string) (string, erro
 	timeout := int64(p.server.cfg.globalTimeout.Seconds())
 
 	result := p.server.scripts.run(ctx, rc.rdb, "dequeue",
-		[]string{readyKey, processingKey, jobPrefix},
-		now, timeout, p.cfg.name,
+		[]string{readyKey, processingKey, jobPrefix, pausedKey},
+		now, timeout, p.cfg.name, queue,
 	)
 
 	if result.Err() != nil {
 		if errors.Is(result.Err(), redis.Nil) {
-			return "", nil // Queue empty
+			return "", nil, nil // Queue empty or paused
 		}
-		return "", result.Err()
+		return "", nil, result.Err()
 	}
 
-	jobID, err := result.Text()
+	// Lua returns [job_id, field1, val1, field2, val2, ...].
+	arr, err := result.StringSlice()
 	if err != nil {
-		return "", fmt.Errorf("reading dequeue result: %w", err)
+		return "", nil, fmt.Errorf("reading dequeue result: %w", err)
+	}
+	if len(arr) < 3 {
+		return "", nil, nil
 	}
 
-	return jobID, nil
+	jobID := arr[0]
+	data := make(map[string]string, (len(arr)-1)/2)
+	for i := 1; i+1 < len(arr); i += 2 {
+		data[arr[i]] = arr[i+1]
+	}
+
+	return jobID, data, nil
 }
 
 // processJob fetches a job, executes the handler, and updates the result.
 // The queue parameter is the queue name from which the job was dequeued,
 // used as fallback when the job hash cannot be fetched.
-func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queue string) {
+func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queue string, data map[string]string) {
 	rc := p.server.rc
 
 	// Track active job
@@ -280,22 +290,25 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 		p.mu.Unlock()
 	}()
 
-	// Fetch job data
-	jobKey := rc.Key("job", jobID)
-	result, err := rc.rdb.HGetAll(ctx, jobKey).Result()
-	if err != nil || len(result) == 0 {
-		p.logger.Error("failed to fetch job", "job_id", jobID, "error", err)
-		// Use the dequeue source queue so ZREM targets the correct processing set.
-		failedJob := &Job{ID: jobID, Queue: queue}
-		p.handleFailure(ctx, failedJob, "failed to fetch job data", nil)
-		return
+	// Use job data returned from dequeue Lua script.
+	// Fall back to HGetAll if data is missing (shouldn't happen in normal flow).
+	if len(data) == 0 {
+		jobKey := rc.Key("job", jobID)
+		var err error
+		data, err = rc.rdb.HGetAll(ctx, jobKey).Result()
+		if err != nil || len(data) == 0 {
+			p.logger.Error("failed to fetch job", "job_id", jobID, "error", err)
+			failedJob := &Job{ID: jobID, Queue: queue}
+			p.handleFailure(ctx, failedJob, "failed to fetch job data", nil)
+			return
+		}
 	}
 
-	job, err := JobFromMap(result)
+	job, err := JobFromMap(data)
 	if err != nil {
 		p.logger.Error("failed to parse job", "job_id", jobID, "error", err)
 		failedJob := &Job{ID: jobID, Queue: queue}
-		if q, ok := result["queue"]; ok && q != "" {
+		if q, ok := data["queue"]; ok && q != "" {
 			failedJob.Queue = q
 		}
 		p.handleFailure(ctx, failedJob, "failed to parse job data: "+err.Error(), nil)

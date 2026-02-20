@@ -104,20 +104,19 @@ func (j *Job) ToMap() (map[string]any, error) {
 		return nil, fmt.Errorf("encoding payload: %w", err)
 	}
 
-	m := map[string]any{
-		"id":           j.ID,
-		"type":         j.Type,
-		"queue":        j.Queue,
-		"payload":      string(payloadJSON),
-		"status":       j.Status,
-		"retry_count":  j.RetryCount,
-		"max_retry":    j.MaxRetry,
-		"timeout":      j.Timeout,
-		"created_at":    j.CreatedAt,
-		"scheduled_at":  j.ScheduledAt,
-		"started_at":    j.StartedAt,
-		"completed_at":  j.CompletedAt,
-	}
+	m := make(map[string]any, 20)
+	m["id"] = j.ID
+	m["type"] = j.Type
+	m["queue"] = j.Queue
+	m["payload"] = string(payloadJSON)
+	m["status"] = j.Status
+	m["retry_count"] = j.RetryCount
+	m["max_retry"] = j.MaxRetry
+	m["timeout"] = j.Timeout
+	m["created_at"] = j.CreatedAt
+	m["scheduled_at"] = j.ScheduledAt
+	m["started_at"] = j.StartedAt
+	m["completed_at"] = j.CompletedAt
 
 	// Always include error and worker_id so HSet can clear stale values on retry.
 	m["error"] = j.Error
