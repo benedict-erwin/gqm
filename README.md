@@ -573,6 +573,40 @@ gqm tui [--api-url <url>] [--api-key <key>]  Launch terminal monitor
 gqm version                 Show version
 ```
 
+## Performance
+
+Benchmarked on Linux arm64 (Docker), Redis 7, Go 1.26, 4 vCPU. All operations use Lua scripts for atomic Redis state transitions.
+
+### Throughput
+
+| Operation | Latency | Throughput |
+|-----------|--------:|----------:|
+| Single enqueue | ~55 µs | **18,100 jobs/sec** |
+| End-to-end (enqueue → process → complete) | ~100 µs | **10,000 jobs/sec** |
+| Batch enqueue (100 jobs) | ~726 µs | **137,700 jobs/sec** |
+| Batch enqueue (1000 jobs) | ~7.3 ms | **137,800 jobs/sec** |
+| Burst drain (30 workers) | — | **19,700 jobs/sec** |
+| Large payload 10 KB | — | **1,607 jobs/sec** |
+| Large payload 100 KB | — | **346 jobs/sec** |
+
+### Stress Test Highlights
+
+| Scenario | Result |
+|----------|--------|
+| Data integrity (10K jobs, 20 workers) | **Zero loss, zero duplicates** |
+| Sustained load (30s, 558K jobs) | **Zero loss**, p50 latency 3.2s, drain 3.8s |
+| Retry storm (2K jobs × 4 attempts) | All 8K attempts processed correctly |
+| High concurrency (60 workers, 3 pools) | Stable, no goroutine or memory leaks |
+| Backpressure (735K queue depth) | System responsive, no degradation |
+| Panic recovery (500 panics) | All recovered, workers remain operational |
+
+### Resource Efficiency
+
+- **3 production dependencies** — go-redis, yaml.v3, x/crypto
+- **12 Lua scripts** — all Redis state transitions are atomic
+- **Zero goroutine leaks** — verified across all stress test scenarios
+- **Memory stable** — no runaway growth under sustained load
+
 ## Architecture
 
 ```
@@ -597,6 +631,10 @@ gqm.Client                                              gqm.Server
 Everything else is stdlib or implemented from scratch (UUID v7, cron parser, HTTP router via Go 1.22+, logging via `log/slog`).
 
 TUI module (`gqm/tui`) additionally depends on `bubbletea` and charmbracelet ecosystem, but is a separate Go module — importing the core library does not pull TUI dependencies.
+
+## Co-authored with AI
+
+This project was built with significant assistance from **Claude** (Anthropic). Architecture decisions, implementation, testing, and documentation were co-developed through iterative human-AI collaboration.
 
 ## License
 
