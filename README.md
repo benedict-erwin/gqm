@@ -29,7 +29,7 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 - **Redis TLS** — `WithRedisTLS()` option or `redis.tls: true` config for encrypted connections (pass custom `*tls.Config` or `nil` for system defaults)
 - **API rate limiting** — Per-IP token bucket on all API endpoints (default 100 req/s, configurable via `monitoring.api.rate_limit`, `/health` exempt)
 - **Redis Sentinel support** — Inject pre-configured `*redis.Client` via `WithRedisClient()` for Sentinel, Cluster, or custom setups
-- **Minimal dependencies** — Only 3 production deps: go-redis, yaml.v3, x/crypto
+- **Minimal dependencies** — Core library: 3 deps (go-redis, yaml.v3, x/crypto). CLI adds x/term for interactive input
 
 ## Requirements
 
@@ -602,7 +602,7 @@ Benchmarked on Linux arm64 (Docker), Redis 7, Go 1.26, 4 vCPU. All operations us
 
 ### Resource Efficiency
 
-- **3 production dependencies** — go-redis, yaml.v3, x/crypto
+- **Minimal dependencies** — core library: 3 deps; CLI adds 1 (see [Dependencies](#dependencies))
 - **12 Lua scripts** — all Redis state transitions are atomic
 - **Zero goroutine leaks** — verified across all stress test scenarios
 - **Memory stable** — no runaway growth under sustained load
@@ -622,15 +622,24 @@ gqm.Client                                              gqm.Server
 
 ## Dependencies
 
+**Core library** (what you get with `go get github.com/benedict-erwin/gqm`):
+
 | Dependency | Purpose |
 |---|---|
 | `github.com/redis/go-redis/v9` | Redis client |
 | `gopkg.in/yaml.v3` | YAML config parsing |
 | `golang.org/x/crypto/bcrypt` | Password hashing (dashboard auth) |
 
+**CLI binary** (`cmd/gqm/`) adds:
+
+| Dependency | Purpose |
+|---|---|
+| `golang.org/x/term` | Interactive password input (`gqm set-password`) |
+
+**TUI module** (`gqm/tui`) is a separate Go module within the same repo — importing the core library does not pull TUI dependencies (bubbletea, lipgloss, etc.).
+
 Everything else is stdlib or implemented from scratch (UUID v7, cron parser, HTTP router via Go 1.22+, logging via `log/slog`).
 
-TUI module (`gqm/tui`) additionally depends on `bubbletea` and charmbracelet ecosystem, but is a separate Go module — importing the core library does not pull TUI dependencies.
 
 ## Co-authored with AI
 
