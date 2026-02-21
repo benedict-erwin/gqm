@@ -1,4 +1,9 @@
 # GQM — Go Queue Manager
+[![Go Reference](https://pkg.go.dev/badge/github.com/benedict-erwin/gqm.svg)](https://pkg.go.dev/github.com/benedict-erwin/gqm)
+[![Go Report Card](https://goreportcard.com/badge/github.com/benedict-erwin/gqm)](https://goreportcard.com/report/github.com/benedict-erwin/gqm)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/benedict-erwin/gqm)](https://github.com/benedict-erwin/gqm/releases)
+[![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue)](https://golang.org)
 
 Redis-based task queue library for Go. Built from scratch with minimal dependencies, progressive disclosure API, and production-grade features including worker isolation, DAG dependencies, cron scheduling, and an embedded monitoring dashboard.
 
@@ -30,6 +35,22 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 - **API rate limiting** — Per-IP token bucket on all API endpoints (default 100 req/s, configurable via `monitoring.api.rate_limit`, `/health` exempt)
 - **Redis Sentinel support** — Inject pre-configured `*redis.Client` via `WithRedisClient()` for Sentinel, Cluster, or custom setups
 - **Minimal dependencies** — Core library: 3 deps (go-redis, yaml.v3, x/crypto). CLI adds x/term for interactive input
+
+## Screenshots
+
+### Web Dashboard
+| Overview | DAG Dependencies |
+|---|---|
+| <img src="docs/images/dashboard-overview.png" width="480" alt="Overview"> | <img src="docs/images/dashboard-dag-dependencies.png" width="480" alt="DAG"> |
+
+| Scheduler | Failed / DLQ |
+|---|---|
+| <img src="docs/images/dashboard-cron.png" width="480" alt="Cron"> | <img src="docs/images/dashboard-dlq.png" width="480" alt="DLQ"> |
+
+### Terminal UI (TUI)
+| Queues | Workers |
+|---|---|
+| ![TUI Queue](docs/images/tui-queue.png) | ![TUI Worker](docs/images/tui-worker.png) |
 
 ## Requirements
 
@@ -696,11 +717,13 @@ gqm.Client                                              gqm.Server
 
 Everything else is stdlib or implemented from scratch (UUID v7, cron parser, HTTP router via Go 1.22+, logging via `log/slog`).
 
-
-## Co-authored with AI
-
-This project was built with significant assistance from **Claude** (Anthropic). Architecture decisions, implementation, testing, and documentation were co-developed through iterative human-AI collaboration.
-
 ## License
 
 MIT
+
+## Built With
+
+- **Go 1.22+** — core language
+- **Redis 7** — backbone storage
+- **Claude (Anthropic)** — AI pair programming assistant for implementation & docs
+
