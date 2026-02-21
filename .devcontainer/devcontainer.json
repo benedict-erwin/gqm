@@ -42,7 +42,7 @@
     "8080": { "label": "GQM Monitor" }
   },
 
-  "postCreateCommand": "go mod download && go build ./...",
+  "postCreateCommand": "[ -f ~/.host-git-config/ignore ] && cp ~/.host-git-config/ignore ~/.gitignore_global && git config --global core.excludesFile ~/.gitignore_global; go mod download && go build ./...",
 
   "remoteUser": "vscode"
 }

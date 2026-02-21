@@ -3,6 +3,7 @@ services:
     image: mcr.microsoft.com/devcontainers/base:bookworm
     volumes:
       - ..:/workspace:cached
+      - ~/.config/git:/home/vscode/.host-git-config:ro
     command: sleep infinity
     depends_on:
       redis:

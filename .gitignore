@@ -13,6 +13,10 @@
 /cmd/gqm/gqm
 /dashboard-dev
 
+# Go workspace (local dev only)
+go.work
+go.work.sum
+
 # Go vendor
 /vendor/
 
