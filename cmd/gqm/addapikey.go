@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,7 +31,7 @@ Flags:`)
 		return 1
 	}
 
-	if *configPath == "" || *name == "" {
+	if *configPath == "" || strings.TrimSpace(*name) == "" {
 		fs.Usage()
 		return 1
 	}

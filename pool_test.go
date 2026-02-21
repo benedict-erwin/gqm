@@ -420,3 +420,51 @@ func TestPoolRetryDelay_FixedNoBase(t *testing.T) {
 		t.Errorf("got %v, want default %v", got, defaultRetryDelay)
 	}
 }
+
+func TestPoolRetryDelay_ExponentialOverflow(t *testing.T) {
+	// No BackoffMax set — overflow must be caught and capped.
+	rp := &RetryPolicy{
+		Backoff:     BackoffExponential,
+		BackoffBase: 1 * time.Second,
+	}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	// retryCount=100 would cause 2^99 overflow without guard.
+	got := p.poolRetryDelay(rp, 100)
+	if got <= 0 {
+		t.Fatalf("overflow not caught: got %v", got)
+	}
+	if got > maxBackoffDelay {
+		t.Errorf("delay %v exceeds maxBackoffDelay %v", got, maxBackoffDelay)
+	}
+}
+
+func TestPoolRetryDelay_ExponentialOverflowWithMax(t *testing.T) {
+	// BackoffMax set — overflow should return BackoffMax.
+	rp := &RetryPolicy{
+		Backoff:     BackoffExponential,
+		BackoffBase: 1 * time.Second,
+		BackoffMax:  1 * time.Hour,
+	}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	got := p.poolRetryDelay(rp, 100)
+	if got != 1*time.Hour {
+		t.Errorf("got %v, want BackoffMax 1h", got)
+	}
+}
+
+func TestPoolRetryDelay_ExponentialHardCap(t *testing.T) {
+	// No BackoffMax, moderate retry count that exceeds 24h without overflow.
+	rp := &RetryPolicy{
+		Backoff:     BackoffExponential,
+		BackoffBase: 1 * time.Minute,
+	}
+	p := newTestPool(&poolConfig{retryPolicy: rp})
+
+	// 2^20 minutes = ~1048576 min >> 24h; should be capped at maxBackoffDelay.
+	got := p.poolRetryDelay(rp, 21)
+	if got != maxBackoffDelay {
+		t.Errorf("got %v, want maxBackoffDelay %v", got, maxBackoffDelay)
+	}
+}

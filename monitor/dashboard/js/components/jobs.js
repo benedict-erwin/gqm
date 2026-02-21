@@ -24,7 +24,7 @@ GQM.pages.jobs = {
             '<div class="filter-bar">' +
             '<div class="filter-group">' +
             '<label>Filter by status:</label>' +
-            '<select id="status-filter" onchange="GQM.pages.jobs.changeStatus(this.value)">' +
+            '<select id="status-filter">' +
             '<option value="all">All</option>' +
             '<option value="ready">Ready</option>' +
             '<option value="processing">Processing</option>' +
@@ -39,6 +39,14 @@ GQM.pages.jobs = {
             '</div>' +
             '<div id="jobs-table" class="table-wrap"><div class="loading">Loading jobs</div></div>' +
             '<div id="jobs-pagination"></div>';
+
+        // Status filter
+        var statusFilter = document.getElementById('status-filter');
+        if (statusFilter) {
+            statusFilter.addEventListener('change', function() {
+                GQM.pages.jobs.changeStatus(this.value);
+            });
+        }
 
         // Client-side job ID filter
         var filterInput = document.getElementById('job-id-filter');
@@ -334,6 +342,18 @@ GQM.pages.jobs = {
             '</div>' +
             '<div id="job-detail"><div class="loading">Loading job</div></div>';
 
+        // Event delegation for job detail action buttons
+        document.getElementById('job-detail').addEventListener('click', function(e) {
+            var btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            var action = btn.getAttribute('data-action');
+            var id = btn.getAttribute('data-id');
+            if (action === 'back') window.history.back();
+            else if (action === 'retry') GQM.pages.jobs.retry(id);
+            else if (action === 'cancel') GQM.pages.jobs.cancel(id);
+            else if (action === 'delete') GQM.pages.jobs.deleteJob(id);
+        });
+
         GQM.pages.jobs.loadJobDetail(jobId);
     },
 
@@ -397,14 +417,14 @@ GQM.pages.jobs = {
 
             // Action buttons — Back always first (leftmost)
             html += '<div class="btn-group">';
-            html += '<button class="btn btn--secondary" onclick="window.history.back()">&laquo; Back</button>';
+            html += '<button class="btn btn--secondary" data-action="back">&laquo; Back</button>';
             if (j.status === 'dead_letter' || j.status === 'failed' || j.status === 'canceled') {
-                html += '<button class="btn btn--primary" onclick="GQM.pages.jobs.retry(\'' + GQM.utils.escapeHTML(j.id) + '\')">Retry</button>';
+                html += '<button class="btn btn--primary" data-action="retry" data-id="' + GQM.utils.escapeHTML(j.id) + '">Retry</button>';
             }
             if (j.status === 'ready' || j.status === 'processing' || j.status === 'deferred') {
-                html += '<button class="btn btn--danger" onclick="GQM.pages.jobs.cancel(\'' + GQM.utils.escapeHTML(j.id) + '\')">Cancel</button>';
+                html += '<button class="btn btn--danger" data-action="cancel" data-id="' + GQM.utils.escapeHTML(j.id) + '">Cancel</button>';
             }
-            html += '<button class="btn btn--danger" onclick="GQM.pages.jobs.deleteJob(\'' + GQM.utils.escapeHTML(j.id) + '\')">Delete</button>';
+            html += '<button class="btn btn--danger" data-action="delete" data-id="' + GQM.utils.escapeHTML(j.id) + '">Delete</button>';
             html += '</div>';
 
             el.innerHTML = html;

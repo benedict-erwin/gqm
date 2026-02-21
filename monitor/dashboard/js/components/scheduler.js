@@ -11,6 +11,18 @@ GQM.pages.scheduler = {
             '<div id="cron-table" class="table-wrap"><div class="loading">Loading cron entries</div></div>' +
             '<div id="cron-detail"></div>';
 
+        // Event delegation for cron action buttons
+        document.getElementById('cron-table').addEventListener('click', function(e) {
+            var btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            var action = btn.getAttribute('data-action');
+            var id = btn.getAttribute('data-id');
+            if (action === 'trigger') GQM.pages.scheduler.trigger(id);
+            else if (action === 'disable') GQM.pages.scheduler.disable(id);
+            else if (action === 'enable') GQM.pages.scheduler.enable(id);
+            else if (action === 'history') GQM.pages.scheduler.showHistory(id);
+        });
+
         GQM.app.poll(function() { GQM.pages.scheduler.load(); }, 30000);
     },
 
@@ -36,11 +48,11 @@ GQM.pages.scheduler = {
                     '<td>' + statusBadge + '</td>' +
                     '<td>' + GQM.utils.escapeHTML(e.timezone || 'UTC') + '</td>' +
                     '<td class="btn-group">' +
-                    '<button class="btn btn--sm btn--primary" onclick="GQM.pages.scheduler.trigger(\'' + GQM.utils.escapeHTML(e.id) + '\')">Trigger</button>' +
+                    '<button class="btn btn--sm btn--primary" data-action="trigger" data-id="' + GQM.utils.escapeHTML(e.id) + '">Trigger</button>' +
                     (enabled
-                        ? '<button class="btn btn--sm" onclick="GQM.pages.scheduler.disable(\'' + GQM.utils.escapeHTML(e.id) + '\')">Disable</button>'
-                        : '<button class="btn btn--sm" onclick="GQM.pages.scheduler.enable(\'' + GQM.utils.escapeHTML(e.id) + '\')">Enable</button>') +
-                    '<button class="btn btn--sm" onclick="GQM.pages.scheduler.showHistory(\'' + GQM.utils.escapeHTML(e.id) + '\')">History</button>' +
+                        ? '<button class="btn btn--sm" data-action="disable" data-id="' + GQM.utils.escapeHTML(e.id) + '">Disable</button>'
+                        : '<button class="btn btn--sm" data-action="enable" data-id="' + GQM.utils.escapeHTML(e.id) + '">Enable</button>') +
+                    '<button class="btn btn--sm" data-action="history" data-id="' + GQM.utils.escapeHTML(e.id) + '">History</button>' +
                     '</td>' +
                     '</tr>';
             }).join('');

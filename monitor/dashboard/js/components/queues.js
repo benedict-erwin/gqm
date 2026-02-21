@@ -27,6 +27,17 @@ GQM.pages.queues = {
             header +
             '<div id="queues-table" class="table-wrap"><div class="loading">Loading queues</div></div>';
 
+        // Event delegation for queue action buttons
+        document.getElementById('queues-table').addEventListener('click', function(e) {
+            var btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            var action = btn.getAttribute('data-action');
+            var queue = btn.getAttribute('data-queue');
+            if (action === 'pause') GQM.pages.queues.pause(queue);
+            else if (action === 'resume') GQM.pages.queues.resume(queue);
+            else if (action === 'empty') GQM.pages.queues.empty(queue);
+        });
+
         if (poolName) {
             // Fetch workers to resolve pool → queues mapping, then load queues
             GQM.api.get('/api/v1/workers').then(function(resp) {
@@ -87,9 +98,9 @@ GQM.pages.queues = {
                     '<td>' + GQM.utils.formatNumber(q.failed_total) + '</td>' +
                     '<td class="btn-group">' +
                     (q.paused
-                        ? '<button class="btn btn--sm" onclick="GQM.pages.queues.resume(\'' + GQM.utils.escapeHTML(q.name) + '\')">Resume</button>'
-                        : '<button class="btn btn--sm" onclick="GQM.pages.queues.pause(\'' + GQM.utils.escapeHTML(q.name) + '\')">Pause</button>') +
-                    '<button class="btn btn--sm btn--danger" onclick="GQM.pages.queues.empty(\'' + GQM.utils.escapeHTML(q.name) + '\')">Empty</button>' +
+                        ? '<button class="btn btn--sm" data-action="resume" data-queue="' + GQM.utils.escapeHTML(q.name) + '">Resume</button>'
+                        : '<button class="btn btn--sm" data-action="pause" data-queue="' + GQM.utils.escapeHTML(q.name) + '">Pause</button>') +
+                    '<button class="btn btn--sm btn--danger" data-action="empty" data-queue="' + GQM.utils.escapeHTML(q.name) + '">Empty</button>' +
                     '</td>' +
                     '</tr>';
             }).join('');

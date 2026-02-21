@@ -310,7 +310,11 @@ func cronInSet(vals []int, v int) bool {
 
 // cronNextInSet returns the smallest value in vals that is >= v.
 // If no such value exists, it returns vals[0] and wrapped=true.
+// Panics if vals is empty (caller must guarantee non-empty sets).
 func cronNextInSet(vals []int, v int) (next int, wrapped bool) {
+	if len(vals) == 0 {
+		panic("cronNextInSet: empty value set")
+	}
 	i := sort.SearchInts(vals, v)
 	if i < len(vals) {
 		return vals[i], false

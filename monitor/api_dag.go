@@ -338,7 +338,9 @@ func (m *Monitor) bfsGraph(ctx context.Context, rootID string, maxDepth, maxNode
 			// Explore parents (via depends_on in the job hash).
 			if depsRaw, ok := data["depends_on"]; ok && depsRaw != "" {
 				var parentIDs []string
-				if json.Unmarshal([]byte(depsRaw), &parentIDs) == nil {
+				if err := json.Unmarshal([]byte(depsRaw), &parentIDs); err != nil {
+					m.logger.Warn("dag: failed to parse depends_on", "job_id", cmd.id, "error", err)
+				} else {
 					for _, pid := range parentIDs {
 						edges = append(edges, dagEdge{Source: pid, Target: cmd.id})
 						if !visited[pid] && cmd.depth+1 <= maxDepth && len(nodes)+len(queue)+len(nextQueue) < maxNodes {

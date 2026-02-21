@@ -61,4 +61,7 @@ var (
 
 	// ErrBatchEnqueueAtFront is returned when EnqueueAtFront is used in EnqueueBatch.
 	ErrBatchEnqueueAtFront = errors.New("gqm: EnqueueAtFront is not supported in EnqueueBatch")
+
+	// ErrJobDataTooLarge is returned when a job's serialized data exceeds maxJobDataSize.
+	ErrJobDataTooLarge = errors.New("gqm: job data exceeds maximum size (1 MB)")
 )

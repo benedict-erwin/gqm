@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/redis/go-redis/v9"
@@ -125,24 +126,29 @@ func mapToJobResponse(data map[string]string) map[string]any {
 		switch k {
 		case "payload", "meta":
 			var parsed any
-			if json.Unmarshal([]byte(v), &parsed) == nil {
-				job[k] = parsed
-			} else {
+			if err := json.Unmarshal([]byte(v), &parsed); err != nil {
+				slog.Warn("job: failed to parse JSON field", "field", k, "error", err)
 				job[k] = v
+			} else {
+				job[k] = parsed
 			}
 		case "depends_on", "retry_intervals":
 			var parsed any
-			if json.Unmarshal([]byte(v), &parsed) == nil {
-				job[k] = parsed
-			} else {
+			if err := json.Unmarshal([]byte(v), &parsed); err != nil {
+				slog.Warn("job: failed to parse JSON field", "field", k, "error", err)
 				job[k] = v
+			} else {
+				job[k] = parsed
 			}
 		case "result":
 			var parsed any
-			if v != "" && json.Unmarshal([]byte(v), &parsed) == nil {
-				job[k] = parsed
-			} else if v != "" {
-				job[k] = v
+			if v != "" {
+				if err := json.Unmarshal([]byte(v), &parsed); err != nil {
+					slog.Warn("job: failed to parse result field", "error", err)
+					job[k] = v
+				} else {
+					job[k] = parsed
+				}
 			}
 		default:
 			job[k] = v

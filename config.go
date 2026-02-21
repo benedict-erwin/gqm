@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -240,6 +241,9 @@ func (c *Config) validate() error {
 
 		if p.Concurrency < 0 {
 			return fmt.Errorf("pools[%d] %q: concurrency must be >= 0", i, p.Name)
+		}
+		if p.Concurrency == 0 {
+			p.Concurrency = runtime.NumCPU()
 		}
 
 		if p.DequeueStrategy != "" {

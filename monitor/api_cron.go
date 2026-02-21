@@ -20,11 +20,13 @@ func (m *Monitor) handleListCron(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entries := make([]map[string]any, 0, len(data))
-	for _, raw := range data {
+	for id, raw := range data {
 		var entry map[string]any
-		if json.Unmarshal([]byte(raw), &entry) == nil {
-			entries = append(entries, entry)
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			m.logger.Warn("cron: failed to parse entry", "entry_id", id, "error", err)
+			continue
 		}
+		entries = append(entries, entry)
 	}
 
 	// Sort by ID for deterministic output

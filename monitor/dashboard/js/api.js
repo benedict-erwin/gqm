@@ -35,6 +35,10 @@ GQM.api = {
                 GQM.app.showLogin();
                 return Promise.reject(new Error('Unauthorized'));
             }
+            // Handle 204 No Content (empty body)
+            if (resp.status === 204) {
+                return { data: null };
+            }
             return resp.json().then(function(data) {
                 if (!resp.ok) {
                     var msg = (data && data.error) ? data.error : 'Request failed';

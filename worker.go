@@ -23,6 +23,11 @@ const (
 	// maxAbandonedHandlers is the per-pool limit for leaked handler goroutines.
 	// When reached, the pool logs a critical warning on every new abandon.
 	maxAbandonedHandlers = 100
+
+	// abandonedDrainTimeout is how long the drain goroutine waits for an
+	// abandoned handler to finish before giving up entirely. Prevents
+	// permanent goroutine leak when a handler truly never returns.
+	abandonedDrainTimeout = 1 * time.Hour
 )
 
 // pool manages a set of worker goroutines for processing jobs.
@@ -421,9 +426,19 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 			p.fireCallbacks(ctx, job, timeoutErr)
 			p.handleFailure(ctx, job, "timeout exceeded, handler abandoned", nil)
 			// Drain resultCh in background to decrement counter when handler finishes.
+			// Hard timeout prevents goroutine leak if handler never returns.
 			go func() {
-				<-resultCh
-				p.abandonedHandlers.Add(-1)
+				t := time.NewTimer(abandonedDrainTimeout)
+				defer t.Stop()
+				select {
+				case <-resultCh:
+					p.abandonedHandlers.Add(-1)
+				case <-t.C:
+					p.logger.Warn("abandoned handler drain timed out, goroutine leaked",
+						"job_id", jobID,
+						"drain_timeout", abandonedDrainTimeout,
+					)
+				}
 			}()
 		}
 	}
@@ -733,10 +748,21 @@ func (p *pool) poolRetryDelay(rp *RetryPolicy, retryCount int) time.Duration {
 		delay := base
 		for i := 1; i < retryCount; i++ {
 			delay *= 2
+			// Overflow guard: if delay went negative, cap immediately.
+			if delay <= 0 {
+				if rp.BackoffMax > 0 {
+					return rp.BackoffMax
+				}
+				return maxBackoffDelay
+			}
 			if rp.BackoffMax > 0 && delay > rp.BackoffMax {
 				delay = rp.BackoffMax
 				break
 			}
+		}
+		// Hard cap when no explicit BackoffMax is set.
+		if rp.BackoffMax <= 0 && delay > maxBackoffDelay {
+			delay = maxBackoffDelay
 		}
 		return delay
 

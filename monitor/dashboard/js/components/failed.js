@@ -18,7 +18,7 @@ GQM.pages.failed = {
             '<div class="filter-bar">' +
             '<div class="filter-group">' +
             '<label>Queue:</label>' +
-            '<select id="dlq-queue-select" onchange="GQM.pages.failed.selectQueue(this.value)">' +
+            '<select id="dlq-queue-select">' +
             '<option value="">Select queue...</option>' +
             '</select>' +
             '</div>' +
@@ -28,13 +28,43 @@ GQM.pages.failed = {
             '</div>' +
             '</div>' +
             '<div id="dlq-bulk-actions" class="btn-group mb-2" style="display:none">' +
-            '<button class="btn btn--sm btn--primary" onclick="GQM.pages.failed.bulkRetry()">Retry Selected</button>' +
-            '<button class="btn btn--sm btn--danger" onclick="GQM.pages.failed.bulkDelete()">Delete Selected</button>' +
-            '<button class="btn btn--sm" onclick="GQM.pages.failed.retryAll()">Retry All</button>' +
-            '<button class="btn btn--sm btn--danger" onclick="GQM.pages.failed.clearAll()">Clear All</button>' +
+            '<button class="btn btn--sm btn--primary" data-action="bulk-retry">Retry Selected</button>' +
+            '<button class="btn btn--sm btn--danger" data-action="bulk-delete">Delete Selected</button>' +
+            '<button class="btn btn--sm" data-action="retry-all">Retry All</button>' +
+            '<button class="btn btn--sm btn--danger" data-action="clear-all">Clear All</button>' +
             '</div>' +
             '<div id="dlq-table" class="table-wrap"><div class="empty-state"><p>Select a queue to view dead letter jobs</p></div></div>' +
             '<div id="dlq-pagination"></div>';
+
+        // Queue selector
+        var queueSelect = document.getElementById('dlq-queue-select');
+        if (queueSelect) {
+            queueSelect.addEventListener('change', function() {
+                GQM.pages.failed.selectQueue(this.value);
+            });
+        }
+
+        // Bulk action buttons delegation
+        document.getElementById('dlq-bulk-actions').addEventListener('click', function(e) {
+            var btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            var action = btn.getAttribute('data-action');
+            if (action === 'bulk-retry') GQM.pages.failed.bulkRetry();
+            else if (action === 'bulk-delete') GQM.pages.failed.bulkDelete();
+            else if (action === 'retry-all') GQM.pages.failed.retryAll();
+            else if (action === 'clear-all') GQM.pages.failed.clearAll();
+        });
+
+        // Checkbox delegation on DLQ table
+        document.getElementById('dlq-table').addEventListener('change', function(e) {
+            var cb = e.target;
+            if (cb.type !== 'checkbox') return;
+            if (cb.getAttribute('data-action') === 'toggle-all') {
+                GQM.pages.failed.toggleAll(cb);
+            } else if (cb.getAttribute('data-id')) {
+                GQM.pages.failed.toggleJob(cb);
+            }
+        });
 
         // Job ID filter
         var filterInput = document.getElementById('dlq-job-filter');
@@ -92,7 +122,7 @@ GQM.pages.failed = {
             var rows = jobs.map(function(j) {
                 var checked = GQM.pages.failed.selectedJobs.indexOf(j.id) >= 0 ? ' checked' : '';
                 return '<tr data-job-id="' + GQM.utils.escapeHTML(j.id).toLowerCase() + '">' +
-                    '<td class="checkbox-col"><input type="checkbox" data-id="' + GQM.utils.escapeHTML(j.id) + '"' + checked + ' onchange="GQM.pages.failed.toggleJob(this)"></td>' +
+                    '<td class="checkbox-col"><input type="checkbox" data-id="' + GQM.utils.escapeHTML(j.id) + '"' + checked + '></td>' +
                     '<td class="mono truncate"><a href="#/jobs/' + GQM.utils.escapeHTML(j.id) + '">' + GQM.utils.escapeHTML(j.id) + '</a></td>' +
                     '<td>' + GQM.utils.escapeHTML(j.type || '') + '</td>' +
                     '<td>' + GQM.utils.escapeHTML(j.error || '') + '</td>' +
@@ -103,7 +133,7 @@ GQM.pages.failed = {
 
             el.innerHTML =
                 '<table><thead><tr>' +
-                '<th class="checkbox-col"><input type="checkbox" onchange="GQM.pages.failed.toggleAll(this)"></th>' +
+                '<th class="checkbox-col"><input type="checkbox" data-action="toggle-all"></th>' +
                 '<th>Job ID</th><th>Type</th><th>Error</th><th>Retries</th><th>Created</th>' +
                 '</tr></thead><tbody>' + rows + '</tbody></table>';
 

@@ -36,7 +36,7 @@ Flags:`)
 		return 1
 	}
 
-	if *configPath == "" || *username == "" {
+	if *configPath == "" || strings.TrimSpace(*username) == "" {
 		fs.Usage()
 		return 1
 	}

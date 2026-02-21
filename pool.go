@@ -11,6 +11,7 @@ const (
 	defaultShutdownTimeout   = 30 * time.Second
 	defaultHeartbeatInterval = 5 * time.Second
 	defaultRetryDelay        = 10 * time.Second
+	maxBackoffDelay          = 24 * time.Hour
 )
 
 // DequeueStrategy determines how a pool selects jobs from multiple queues.

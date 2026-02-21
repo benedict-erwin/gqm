@@ -152,5 +152,9 @@ func (m *Monitor) handleClearDLQ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m.logger.Info("admin: clear DLQ", "queue", name, "cleared", cleared, "user", r.Header.Get("X-GQM-User"))
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"cleared": cleared,
+		},
+	})
 }

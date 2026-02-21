@@ -1303,8 +1303,14 @@ func TestAdminDLQ_ClearSuccess(t *testing.T) {
 	rdb.SAdd(context.Background(), m.key("queues"), "default")
 
 	w := doRequest(m, "DELETE", "/api/v1/queues/default/dead-letter/clear", "")
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data, _ := resp["data"].(map[string]any)
+	if data == nil || data["cleared"] == nil {
+		t.Fatal("response missing data.cleared field")
 	}
 }
 

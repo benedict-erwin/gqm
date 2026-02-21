@@ -44,12 +44,15 @@ GQM.utils = {
         return '<span class="badge badge--' + cls + '">' + GQM.utils.escapeHTML(status) + '</span>';
     },
 
-    // Escape HTML special characters.
+    // Escape HTML special characters (safe for both element content and attributes).
     escapeHTML: function(str) {
         if (str == null) return '';
-        var div = document.createElement('div');
-        div.textContent = String(str);
-        return div.innerHTML;
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     },
 
     // Simple HTML template — replaces {{key}} with escaped values.

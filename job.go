@@ -20,6 +20,11 @@ const (
 	StatusCanceled   = "canceled"
 )
 
+const (
+	// maxJobDataSize is the maximum allowed size of a serialized job payload (1 MB).
+	maxJobDataSize = 1 << 20
+)
+
 // Payload is a type alias for job payload data.
 type Payload map[string]any
 
@@ -104,6 +109,9 @@ func (j *Job) ToMap() (map[string]any, error) {
 	payloadJSON, err := json.Marshal(j.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("encoding payload: %w", err)
+	}
+	if len(payloadJSON) > maxJobDataSize {
+		return nil, ErrJobDataTooLarge
 	}
 
 	m := make(map[string]any, 12)
