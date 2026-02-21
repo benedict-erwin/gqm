@@ -1,16 +1,56 @@
 // GQM Dashboard — queues.js
 // Queue list and queue detail (jobs by status).
+// Supports pool filtering via ?pool=<name> query param.
 
 var GQM = window.GQM || {};
 GQM.pages = GQM.pages || {};
 
 GQM.pages.queues = {
+    poolFilter: null,   // current pool filter name
+    poolQueues: null,    // array of queue names for the filtered pool
+
     render: function(container) {
+        var r = GQM.utils.parseRoute();
+        var poolName = (r.query && r.query.pool) || null;
+        GQM.pages.queues.poolFilter = poolName;
+        GQM.pages.queues.poolQueues = null;
+
+        var header = '<div class="page-header"><h2>Queues</h2></div>';
+        if (poolName) {
+            header = '<div class="page-header">' +
+                '<h2>Queues &mdash; ' + GQM.utils.escapeHTML(poolName) + '</h2>' +
+                '<a href="#/queues" class="btn btn--sm">Show all queues</a>' +
+                '</div>';
+        }
+
         container.innerHTML =
-            '<div class="page-header"><h2>Queues</h2></div>' +
+            header +
             '<div id="queues-table" class="table-wrap"><div class="loading">Loading queues</div></div>';
 
-        GQM.app.poll(function() { GQM.pages.queues.load(); }, 10000);
+        if (poolName) {
+            // Fetch workers to resolve pool → queues mapping, then load queues
+            GQM.api.get('/api/v1/workers').then(function(resp) {
+                var workers = resp.data || [];
+                var match = null;
+                for (var i = 0; i < workers.length; i++) {
+                    if ((workers[i].pool_id || workers[i].id) === poolName) {
+                        match = workers[i];
+                        break;
+                    }
+                }
+                if (match && Array.isArray(match.queues)) {
+                    GQM.pages.queues.poolQueues = match.queues;
+                } else {
+                    GQM.pages.queues.poolQueues = [];
+                }
+                GQM.app.poll(function() { GQM.pages.queues.load(); }, 10000);
+            }).catch(function() {
+                GQM.pages.queues.poolQueues = [];
+                GQM.app.poll(function() { GQM.pages.queues.load(); }, 10000);
+            });
+        } else {
+            GQM.app.poll(function() { GQM.pages.queues.load(); }, 10000);
+        }
     },
 
     load: function() {
@@ -19,8 +59,19 @@ GQM.pages.queues = {
             var el = document.getElementById('queues-table');
             if (!el) return;
 
+            // Apply pool filter if active
+            var poolQueues = GQM.pages.queues.poolQueues;
+            if (poolQueues !== null) {
+                queues = queues.filter(function(q) {
+                    return poolQueues.indexOf(q.name) !== -1;
+                });
+            }
+
             if (queues.length === 0) {
-                el.innerHTML = '<div class="empty-state"><p>No queues registered</p></div>';
+                var msg = GQM.pages.queues.poolFilter
+                    ? 'No queues found for pool "' + GQM.utils.escapeHTML(GQM.pages.queues.poolFilter) + '"'
+                    : 'No queues registered';
+                el.innerHTML = '<div class="empty-state"><p>' + msg + '</p></div>';
                 return;
             }
 

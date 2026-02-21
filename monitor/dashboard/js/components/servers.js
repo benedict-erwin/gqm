@@ -34,7 +34,7 @@ GQM.pages.servers = {
                 var pools = '';
                 if (Array.isArray(s.pools)) {
                     pools = s.pools.map(function(p) {
-                        return GQM.utils.escapeHTML(p);
+                        return '<a href="#/queues?pool=' + encodeURIComponent(p) + '">' + GQM.utils.escapeHTML(p) + '</a>';
                     }).join(', ');
                 }
 

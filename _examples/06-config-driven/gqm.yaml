@@ -51,7 +51,7 @@ pools:
 
 scheduler:
   poll_interval: 5
-  entries:
+  cron_entries:
     - id: temp-cleanup
       name: "Temporary File Cleanup"
       cron_expr: "0 */6 * * *"     # every 6 hours

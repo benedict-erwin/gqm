@@ -21,7 +21,7 @@ docker compose up -d
 | 06 | [Config-driven](06-config-driven/) | YAML config, NewServerFromConfig | `cd _examples/06-config-driven && go run .` |
 | 07 | [Webhook Delivery](07-webhook-delivery/) | Unique, JobID, custom retry intervals | `go run ./_examples/07-webhook-delivery` |
 | 08 | [Monitoring](08-monitoring/) | Dashboard, HTTP API, auth, API keys | `go run ./_examples/08-monitoring` |
-| 09 | [Dev Server](09-dev-server/) | All features, dummy data, DAG patterns | `go run ./_examples/09-dev-server` |
+| 09 | [Dev Server](09-dev-server/) | All features, multi-queue pools, varied strategies, DAGs, dummy data | `go run ./_examples/09-dev-server` |
 | 10 | [Advanced Features](10-advanced-features/) | ErrSkipRetry, IsFailure, middleware, callbacks, batch | `go run ./_examples/10-advanced-features` |
 | 11 | [Custom Dashboard](11-custom-dashboard/) | WithDashboardDir, custom UI | `go run ./_examples/11-custom-dashboard` |
 
@@ -37,9 +37,10 @@ docker compose up -d
 | AllowFailure | 04, 09 |
 | Cron scheduling | 03, 09 |
 | Delayed jobs | 03 |
-| Priority queues | 05 |
-| Dequeue strategies | 05 |
-| Explicit pools | 05, 06 |
+| Priority queues | 05, 09/config |
+| Dequeue strategies | 05, 09/config |
+| Multi-queue pools | 09/config |
+| Explicit pools | 05, 06, 09/config |
 | YAML config | 06, 09/config |
 | Unique / JobID | 07 |
 | Custom retry intervals | 07 |

@@ -44,7 +44,7 @@ GQM.pages.workers = {
                 }
 
                 return '<tr>' +
-                    '<td class="mono truncate">' + GQM.utils.escapeHTML(w.pool_id || w.id || '') + '</td>' +
+                    '<td class="mono truncate"><a href="#/queues?pool=' + encodeURIComponent(w.pool_id || w.id || '') + '">' + GQM.utils.escapeHTML(w.pool_id || w.id || '') + '</a></td>' +
                     '<td>' + statusBadge + '</td>' +
                     '<td>' + GQM.utils.escapeHTML(w.concurrency || '') + '</td>' +
                     '<td>' + queues + '</td>' +

@@ -110,13 +110,24 @@ GQM.utils = {
         return html;
     },
 
-    // Parse hash route: "#/queues/email" -> { page: "queues", param: "email" }
+    // Parse hash route: "#/queues/email?pool=x" -> { page: "queues", param: "email", query: {pool:"x"} }
     parseRoute: function() {
         var hash = window.location.hash.replace(/^#\/?/, '');
+        var queryIdx = hash.indexOf('?');
+        var query = {};
+        if (queryIdx !== -1) {
+            var qs = hash.substring(queryIdx + 1);
+            hash = hash.substring(0, queryIdx);
+            qs.split('&').forEach(function(pair) {
+                var kv = pair.split('=');
+                if (kv[0]) query[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || '');
+            });
+        }
         var parts = hash.split('/');
         return {
             page: parts[0] || '',
-            param: parts.slice(1).join('/') || ''
+            param: parts.slice(1).join('/') || '',
+            query: query
         };
     }
 };

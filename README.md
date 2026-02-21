@@ -493,6 +493,62 @@ monitoring:
 
 **Auth & security:** Session cookies (bcrypt + HttpOnly/Secure/SameSite), API keys with constant-time comparison, RBAC (admin/viewer), CSRF protection, login rate limiting. Health check at `GET /health` requires no auth.
 
+### REST API
+
+32 endpoints under `/api/v1/`. Authenticate via session cookie (dashboard) or `X-API-Key` header (programmatic). Write endpoints require `X-GQM-CSRF: 1` header (API key exempt).
+
+```bash
+# List queues with API key
+curl -H "X-API-Key: gqm_ak_xxx" http://localhost:8080/api/v1/queues
+
+# Pause a queue (admin only, CSRF header required for session auth, exempt for API key)
+curl -X POST -H "X-API-Key: gqm_ak_xxx" http://localhost:8080/api/v1/queues/email:send/pause
+```
+
+**Read endpoints:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/queues` | List all queues with per-status counts |
+| GET | `/api/v1/queues/{name}` | Queue detail |
+| GET | `/api/v1/queues/{name}/jobs?status=ready&page=1&limit=20` | Paginated job list |
+| GET | `/api/v1/jobs/{id}` | Single job detail |
+| GET | `/api/v1/workers` | List pools with concurrency, queues, active jobs |
+| GET | `/api/v1/stats` | Overview: total counts, worker count, uptime |
+| GET | `/api/v1/cron` | List cron entries with next/last run |
+| GET | `/api/v1/cron/{id}/history` | Cron execution history |
+| GET | `/api/v1/servers` | Active server instances |
+| GET | `/api/v1/dag/deferred` | List deferred jobs (waiting on dependencies) |
+| GET | `/api/v1/dag/roots` | List DAG root jobs |
+| GET | `/api/v1/dag/{id}/graph` | DAG graph (nodes + edges for visualization) |
+
+**Admin endpoints** (require `admin` role):
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/queues/{name}/pause` | Pause queue (workers stop dequeuing) |
+| POST | `/api/v1/queues/{name}/resume` | Resume queue |
+| DELETE | `/api/v1/queues/{name}/empty` | Delete all ready jobs |
+| POST | `/api/v1/queues/{name}/dead-letter/retry-all` | Retry all DLQ jobs |
+| DELETE | `/api/v1/queues/{name}/dead-letter/clear` | Clear DLQ |
+| POST | `/api/v1/jobs/{id}/retry` | Retry single job |
+| POST | `/api/v1/jobs/{id}/cancel` | Cancel job (cascades to DAG dependents) |
+| DELETE | `/api/v1/jobs/{id}` | Delete job |
+| POST | `/api/v1/jobs/batch/retry` | Batch retry (body: `{"job_ids": [...]}`) |
+| POST | `/api/v1/jobs/batch/delete` | Batch delete |
+| POST | `/api/v1/cron/{id}/trigger` | Manual trigger cron entry |
+| POST | `/api/v1/cron/{id}/enable` | Enable cron entry |
+| POST | `/api/v1/cron/{id}/disable` | Disable cron entry |
+
+**Auth endpoints:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/auth/login` | Form login → session cookie |
+| POST | `/auth/logout` | Destroy session |
+| GET | `/auth/me` | Current user info |
+| GET | `/health` | Health check (no auth, no rate limit) |
+
 **Customizing the dashboard:**
 
 You can replace the built-in dashboard with your own HTML/CSS/JS files. GQM's REST API remains fully available as your backend.

@@ -15,14 +15,15 @@
 //   - Dashboard + auth + API key
 //   - Continuous background enqueue
 //
+// For YAML config variant with multi-queue pools and varied dequeue
+// strategies, see: config/ subdirectory.
+//
 // Usage:
 //
 //	go run ./_examples/09-dev-server
 //	open http://localhost:8080/dashboard/
 //
 // Login: admin / admin
-//
-// For YAML config variant, see: config/ subdirectory.
 //
 // Prerequisites: Redis on localhost:6379 (or set GQM_TEST_REDIS_ADDR)
 package main

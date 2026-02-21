@@ -45,6 +45,10 @@ GQM.app = {
         GQM.api.checkAuth().then(function(data) {
             GQM.app.authenticated = true;
             GQM.app.user = data.data || data;
+            // Hide login page if present, show layout
+            var loginPage = document.getElementById('login-page');
+            if (loginPage) loginPage.style.display = 'none';
+            document.getElementById('layout').classList.add('visible');
             GQM.app.updateAuthUI();
             GQM.app.route();
         }).catch(function() {
