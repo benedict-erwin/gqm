@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2] — 2026-02-24
+
+### Fixed
+- **Job timeout capped by shutdownTimeout** — `workerLoop` outer context used `shutdownTimeout` (30s) as hard cap on all job execution, ignoring `globalTimeout`. Now uses `globalTimeout + gracePeriod + shutdownTimeout` as safety net
+- **Retry/DLQ fails after job timeout** — post-timeout cleanup operations (retry, dead-letter) used expired context, causing all Redis operations to fail. Now uses a fresh background context
+- **Zombie jobs on Lua script failure** — `retryJob`, `deadLetterJob`, `completeJob` now fall back to ZREM + status update when Lua script fails, preventing jobs from being permanently stuck in processing set
+- **Heartbeat stale data during grace period** — active job tracking is cleared immediately on timeout, before grace period starts
+
+### Added
+- Integration tests for timeout context cascade scenarios (4 new tests)
+
+### Changed
+- **Dashboard queue table** — add grouped column headers (Current vs Cumulative) with visual separator and tooltips
 
 ## [0.1.1] — 2026-02-21
 

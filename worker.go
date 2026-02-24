@@ -124,10 +124,13 @@ func (p *pool) workerLoop(ctx context.Context, workerIdx int) {
 			continue
 		}
 
-		// processJob uses a dedicated context with shutdownTimeout so that
-		// in-flight jobs can complete during graceful shutdown but won't
-		// block forever if Redis becomes unreachable.
-		jobCtx, jobCancel := context.WithTimeout(context.Background(), p.server.cfg.shutdownTimeout)
+		// processJob manages its own timeout via resolveTimeout (job → pool →
+		// global hierarchy). The outer context here is only a safety net to
+		// prevent infinite hangs (e.g. Redis unreachable during cleanup). It
+		// must be larger than the maximum possible job lifetime to avoid
+		// capping normal execution (see GQM_BUG_ANALYSIS §2).
+		safetyTimeout := p.server.cfg.globalTimeout + p.cfg.gracePeriod + p.server.cfg.shutdownTimeout
+		jobCtx, jobCancel := context.WithTimeout(context.Background(), safetyTimeout)
 		p.processJob(jobCtx, workerIdx, jobID, queue, data)
 		jobCancel()
 	}
@@ -379,12 +382,27 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 		// Timeout reached — cancel context, wait grace period
 		cancel()
 		elapsed := time.Since(startTime)
+
+		// Clear active job immediately so heartbeat goroutine stops
+		// reporting this job as active during the grace period.
+		p.mu.Lock()
+		p.activeJobs[workerIdx] = ""
+		p.mu.Unlock()
+
 		p.logger.Warn("job timeout, waiting grace period",
 			"job_id", jobID,
 			"type", job.Type,
 			"timeout", timeout,
 			"grace_period", p.cfg.gracePeriod,
 		)
+
+		// Create a fresh context for post-timeout operations (retry, DLQ,
+		// complete). The original ctx/jobCtx may already be expired, which
+		// would cause all Redis operations to fail with "context deadline
+		// exceeded", leaving the job as a zombie in the processing set.
+		// See GQM_BUG_ANALYSIS §2 "Secondary Bug".
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), p.server.cfg.shutdownTimeout)
+		defer cleanupCancel()
 
 		gracePeriod := p.cfg.gracePeriod
 		if gracePeriod == 0 {
@@ -397,12 +415,12 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 			graceTimer.Stop()
 			elapsed = time.Since(startTime)
 			if handlerErr != nil {
-				p.fireCallbacks(ctx, job, handlerErr)
-				p.handleFailure(ctx, job, "timeout exceeded, handler stopped: "+handlerErr.Error(), handlerErr)
+				p.fireCallbacks(cleanupCtx, job, handlerErr)
+				p.handleFailure(cleanupCtx, job, "timeout exceeded, handler stopped: "+handlerErr.Error(), handlerErr)
 			} else {
 				// Handler completed during grace period
-				p.fireCallbacks(ctx, job, nil)
-				p.completeJob(ctx, job, elapsed)
+				p.fireCallbacks(cleanupCtx, job, nil)
+				p.completeJob(cleanupCtx, job, elapsed)
 			}
 		case <-graceTimer.C:
 			// Handler still stuck — abandon
@@ -423,8 +441,8 @@ func (p *pool) processJob(ctx context.Context, workerIdx int, jobID string, queu
 					"abandoned_total", total,
 				)
 			}
-			p.fireCallbacks(ctx, job, timeoutErr)
-			p.handleFailure(ctx, job, "timeout exceeded, handler abandoned", nil)
+			p.fireCallbacks(cleanupCtx, job, timeoutErr)
+			p.handleFailure(cleanupCtx, job, "timeout exceeded, handler abandoned", nil)
 			// Drain resultCh in background to decrement counter when handler finishes.
 			// Hard timeout prevents goroutine leak if handler never returns.
 			go func() {
@@ -518,6 +536,7 @@ func (p *pool) completeJob(ctx context.Context, job *Job, elapsed time.Duration)
 			"job_id", job.ID,
 			"error", result.Err(),
 		)
+		p.fallbackRemoveFromProcessing(job, "complete", result.Err())
 		return
 	}
 
@@ -641,6 +660,7 @@ func (p *pool) retryJob(ctx context.Context, job *Job, errMsg string, newRetryCo
 			"job_id", job.ID,
 			"error", result.Err(),
 		)
+		p.fallbackRemoveFromProcessing(job, "retry", result.Err())
 		return
 	}
 
@@ -682,6 +702,7 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 			"job_id", job.ID,
 			"error", result.Err(),
 		)
+		p.fallbackRemoveFromProcessing(job, "deadletter", result.Err())
 		return
 	}
 
@@ -711,6 +732,43 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 			)
 		}
 	}
+}
+
+// fallbackRemoveFromProcessing is a last-resort cleanup when a Lua script
+// (retry/deadletter/complete) fails. It removes the job from the processing
+// sorted set and marks it as failed in the job hash to prevent zombie jobs.
+// This uses a fresh background context since the original may be expired.
+func (p *pool) fallbackRemoveFromProcessing(job *Job, operation string, originalErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rc := p.server.rc
+	processingKey := rc.Key("queue", job.Queue, "processing")
+	jobKey := rc.Key("job", job.ID)
+
+	pipe := rc.rdb.Pipeline()
+	pipe.ZRem(ctx, processingKey, job.ID)
+	pipe.HSet(ctx, jobKey, "status", "failed",
+		"error", fmt.Sprintf("%s failed: %v", operation, originalErr),
+		"failed_at", time.Now().Unix(),
+	)
+	if _, err := pipe.Exec(ctx); err != nil {
+		p.logger.Error("CRITICAL: fallback cleanup also failed, job is a zombie",
+			"job_id", job.ID,
+			"queue", job.Queue,
+			"operation", operation,
+			"original_error", originalErr,
+			"fallback_error", err,
+		)
+		return
+	}
+
+	p.logger.Warn("fallback cleanup: removed job from processing set",
+		"job_id", job.ID,
+		"queue", job.Queue,
+		"operation", operation,
+		"original_error", originalErr,
+	)
 }
 
 // retryDelay calculates the delay before the next retry attempt.

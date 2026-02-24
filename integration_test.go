@@ -2206,3 +2206,361 @@ func TestIntegration_EnqueueBatch_EnqueueAtFrontRejected(t *testing.T) {
 		t.Errorf("expected ErrBatchEnqueueAtFront, got %v", err)
 	}
 }
+
+// TestIntegration_TimeoutNotCappedByShutdownTimeout verifies that job execution
+// is not prematurely capped by shutdownTimeout. Before the fix, workerLoop
+// created an outer context with shutdownTimeout (30s default), which capped
+// all job timeouts regardless of globalTimeout.
+func TestIntegration_TimeoutNotCappedByShutdownTimeout(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var completed atomic.Int32
+
+	// Key setup: shutdownTimeout (2s) < actual job duration (4s) < globalTimeout (30s).
+	// Before fix: job would timeout at 2s (capped by shutdownTimeout).
+	// After fix: job runs for full 4s and completes normally.
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(30*time.Second),
+		WithGracePeriod(2*time.Second),
+		WithShutdownTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("long.job", func(ctx context.Context, job *Job) error {
+		// Sleep 4s — longer than shutdownTimeout (2s) but shorter than globalTimeout (30s).
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(4 * time.Second):
+			completed.Add(1)
+			return nil
+		}
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	job, err := client.Enqueue(ctx, "long.job", Payload{}, Queue("long.job"))
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for job to complete (should take ~4s, not timeout at 2s).
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for job to complete — job may still be capped by shutdownTimeout")
+		default:
+			if completed.Load() > 0 {
+				goto verify
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+verify:
+	// Allow time for completion processing.
+	time.Sleep(1 * time.Second)
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetchedJob.Status != StatusCompleted {
+		t.Errorf("job status = %q, want %q (job was likely capped by shutdownTimeout)", fetchedJob.Status, StatusCompleted)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+// TestIntegration_TimeoutRetryUsesLiveContext verifies that retry operations
+// after job timeout use a fresh context, not the expired one.
+// Before the fix, handleFailure was called with the expired parent context,
+// causing retryJob Lua script to fail with "context deadline exceeded".
+func TestIntegration_TimeoutRetryUsesLiveContext(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var attempts atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(1*time.Second),
+		WithGracePeriod(2*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("retry.job", func(ctx context.Context, job *Job) error {
+		attempts.Add(1)
+		// Block until context is cancelled (timeout).
+		<-ctx.Done()
+		return ctx.Err()
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	job, err := client.Enqueue(ctx, "retry.job", Payload{},
+		Queue("retry.job"),
+		MaxRetry(2), // Allow retries
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for at least 2 attempts (original + 1 retry), proving retry worked.
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatalf("timeout: only %d attempts, expected >= 2 (retry likely failed with expired context)", attempts.Load())
+		default:
+			if attempts.Load() >= 2 {
+				goto verify
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+verify:
+	// Allow processing to settle.
+	time.Sleep(1 * time.Second)
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	// Job should have been retried (not stuck in processing).
+	if fetchedJob.Status == StatusProcessing {
+		t.Errorf("job stuck in processing — retry likely failed with expired context")
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+// TestIntegration_TimeoutDLQUsesLiveContext verifies that dead-letter operations
+// after job timeout use a fresh context. With MaxRetry(0), the job should go
+// directly to DLQ instead of being stuck as a zombie in the processing set.
+func TestIntegration_TimeoutDLQUsesLiveContext(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var started atomic.Int32
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(1*time.Second),
+		WithGracePeriod(2*time.Second),
+		WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	err = server.Handle("dlq.job", func(ctx context.Context, job *Job) error {
+		started.Add(1)
+		<-ctx.Done()
+		return ctx.Err()
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	job, err := client.Enqueue(ctx, "dlq.job", Payload{},
+		Queue("dlq.job"),
+		MaxRetry(0), // No retry — go straight to DLQ
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for handler to start.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			serverCancel()
+			t.Fatal("timeout waiting for handler to start")
+		default:
+			if started.Load() > 0 {
+				goto waitDLQ
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+waitDLQ:
+	// Wait for timeout (1s) + grace period (2s) + buffer.
+	time.Sleep(5 * time.Second)
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetchedJob.Status == StatusProcessing {
+		t.Errorf("job stuck in processing — DLQ operation likely failed with expired context")
+	}
+	if fetchedJob.Status != StatusDeadLetter {
+		t.Errorf("job status = %q, want %q", fetchedJob.Status, StatusDeadLetter)
+	}
+
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
+// TestIntegration_AbandonedHandlerRetrySucceeds verifies that when a handler
+// is abandoned (doesn't return within grace period), the retry/DLQ operation
+// still succeeds and the job doesn't become a zombie in the processing set.
+func TestIntegration_AbandonedHandlerRetrySucceeds(t *testing.T) {
+	skipWithoutRedis(t)
+	prefix := fmt.Sprintf("gqm:test:%d:", time.Now().UnixNano())
+	defer cleanupRedis(t, prefix)
+
+	var started atomic.Int32
+	release := make(chan struct{})
+
+	server, err := NewServer(
+		WithServerRedisOpts(WithRedisAddr(testRedisAddr()), WithPrefix(prefix)),
+		WithGlobalTimeout(1*time.Second),
+		WithGracePeriod(2*time.Second),
+		WithShutdownTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// Handler blocks until explicitly released — simulates a stuck handler
+	// that won't respond to context cancellation or grace period.
+	err = server.Handle("abandon.job", func(ctx context.Context, job *Job) error {
+		started.Add(1)
+		<-release
+		return nil
+	}, Workers(1))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	client, err := NewClient(WithRedisAddr(testRedisAddr()), WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	job, err := client.Enqueue(ctx, "abandon.job", Payload{},
+		Queue("abandon.job"),
+		MaxRetry(1), // Allow 1 retry
+	)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Start(serverCtx)
+	}()
+
+	// Wait for handler to start.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			close(release)
+			serverCancel()
+			t.Fatal("timeout waiting for handler to start")
+		default:
+			if started.Load() > 0 {
+				goto waitAbandoned
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+waitAbandoned:
+	// Wait for timeout (1s) + grace period (2s) + buffer.
+	time.Sleep(5 * time.Second)
+
+	fetchedJob, err := client.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	// Job must NOT be stuck in processing — it should have been retried or moved to scheduled.
+	if fetchedJob.Status == StatusProcessing {
+		t.Errorf("job stuck in processing — abandoned handler retry failed (zombie job)")
+	}
+
+	close(release)
+	serverCancel()
+	select {
+	case <-serverDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}

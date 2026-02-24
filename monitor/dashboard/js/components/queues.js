@@ -106,8 +106,16 @@ GQM.pages.queues = {
             }).join('');
 
             el.innerHTML =
-                '<table><thead><tr>' +
-                '<th>Queue</th><th>Ready</th><th>Processing</th><th>Completed</th><th>Dead Letter</th><th>Processed</th><th>Failed</th><th>Actions</th>' +
+                '<table><thead>' +
+                '<tr class="thead-group">' +
+                '<th rowspan="2">Queue</th>' +
+                '<th colspan="4" class="col-group-bordered">Current</th>' +
+                '<th colspan="2" class="col-group-bordered">Cumulative</th>' +
+                '<th rowspan="2">Actions</th>' +
+                '</tr><tr>' +
+                '<th class="col-group-left">Ready</th><th>Processing</th><th>Completed</th><th>Dead Letter</th>' +
+                '<th class="col-group-left" data-tooltip="Lifetime total of all successfully processed jobs">Processed</th>' +
+                '<th class="col-group-right" data-tooltip="Lifetime total of all failed jobs">Failed</th>' +
                 '</tr></thead><tbody>' + rows + '</tbody></table>';
         }).catch(function(err) {
             var el = document.getElementById('queues-table');
