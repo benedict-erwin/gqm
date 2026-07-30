@@ -164,6 +164,10 @@ app:
   shutdown_timeout: 30            # seconds
   global_job_timeout: 1800        # seconds (30 min default, cannot be disabled)
   grace_period: 10                # seconds
+  result_ttl: 604800              # seconds, 7d. Retention for completed jobs.
+  failure_ttl: 2592000            # seconds, 30d. Dead-lettered, canceled, stopped.
+                                  # -1 = keep forever, 0 = delete on completion.
+                                  # Terminal jobs only — see "Job Retention".
 
 queues:
   - name: "critical"
@@ -249,8 +253,78 @@ client.Enqueue("report.generate", payload,
     gqm.Unique(),                              // idempotent (requires custom JobID)
     gqm.DependsOn(parentID),                   // DAG dependency
     gqm.AllowFailure(true),                    // run even if parent fails
+    gqm.ResultTTL(24 * time.Hour),             // retention override, success
+    gqm.FailureTTL(7 * 24 * time.Hour),        // retention override, failure
 )
 ```
+
+## Job Retention
+
+Jobs that reach a terminal state expire instead of accumulating forever. Two
+windows apply: `result_ttl` for jobs that completed successfully, `failure_ttl`
+for jobs that were dead-lettered, canceled, or stopped. Failures are kept longer
+because a dead-lettered job is evidence someone still has to act on.
+
+```yaml
+app:
+  result_ttl: 604800    # 7 days (default)
+  failure_ttl: 2592000  # 30 days (default)
+```
+
+```go
+// Server-wide
+gqm.NewServer(
+    gqm.WithResultTTL(7 * 24 * time.Hour),
+    gqm.WithFailureTTL(30 * 24 * time.Hour),
+)
+
+// Per job, overriding the server setting
+client.Enqueue("report.generate", payload, gqm.ResultTTL(1 * time.Hour))
+
+// Retain forever, or delete the record the moment the job finishes
+gqm.ResultTTL(gqm.TTLPermanent)
+gqm.ResultTTL(0)
+```
+
+Only terminal jobs ever carry an expiry. A job that is queued, running, or
+waiting on a retry never does — one that expired mid-flight would be lost work.
+This also keeps live jobs outside the candidate set of Redis `volatile-*`
+eviction policies, so memory pressure cannot discard work in progress.
+
+The `:completed` and `:dead_letter` sorted sets are trimmed by score using the
+same window, so a set entry never outlives the job hash it points to.
+
+### Tuning memory per retained job
+
+A retained job costs roughly **1.3 KB** — about 1160 B for the job hash plus
+~129 B for its sorted set entry. At 1000 jobs/day with the default 7-day window
+that is a steady state of a few tens of MB.
+
+You can cut the hash cost roughly in half with a Redis setting, no code change:
+
+```
+hash-max-listpack-value 256   # default is 64
+```
+
+A single field value larger than this converts the **whole** job hash from a
+compact `listpack` to a `hashtable`, which carries substantial per-field
+overhead. A job's `payload` almost always exceeds the 64 B default, so in
+practice every job hash pays it. Measured with a 155 B payload: 1152 B as a
+hashtable, 576 B as a listpack.
+
+Set the cap just above your largest realistic payload — raising it partway does
+nothing, since the hash converts unless *every* value fits. At 13 fields the
+listpack's O(n) field lookup is not a practical cost: `HGETALL` is slightly
+faster than the hashtable, and a worst-case single-field `HGET` gives up ~7%
+throughput at identical p50 latency.
+
+Two caveats. The setting is **per-instance**, so it also affects hashes belonging
+to other applications sharing that Redis. And GQM will never set it for you —
+mutating an operator's Redis config is not a library's business.
+
+> Measuring this yourself: use `MEMORY USAGE <key> SAMPLES 0`. The default
+> samples only 5 fields and extrapolates, which misreports a job hash badly
+> because `payload` dwarfs the other fields — up to 49% under actual.
 
 ## Middleware
 

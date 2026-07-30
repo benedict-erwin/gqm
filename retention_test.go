@@ -576,15 +576,19 @@ func TestRetention_JobRecordCost(t *testing.T) {
 		return err == nil && n >= jobs
 	})
 
+	// SAMPLES 0 examines every field instead of estimating from a sample of 5.
+	// The default sample badly misreports a job hash: the payload field is far
+	// larger than the rest, so whether it lands in the sample swings the estimate
+	// by tens of percent between identical runs.
 	var hashTotal int64
 	for _, id := range ids {
-		usage, err := f.rc.rdb.MemoryUsage(ctx, f.jobKey(id)).Result()
+		usage, err := f.rc.rdb.MemoryUsage(ctx, f.jobKey(id), 0).Result()
 		if err != nil {
 			t.Fatalf("MEMORY USAGE: %v", err)
 		}
 		hashTotal += usage
 	}
-	zsetUsage, err := f.rc.rdb.MemoryUsage(ctx, completedKey).Result()
+	zsetUsage, err := f.rc.rdb.MemoryUsage(ctx, completedKey, 0).Result()
 	if err != nil {
 		t.Fatalf("MEMORY USAGE zset: %v", err)
 	}

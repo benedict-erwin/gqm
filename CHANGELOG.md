@@ -16,9 +16,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Orphaned terminal jobs** — `canceled`, `stopped`, and fallback-`failed` jobs belong to no sorted set, so without an expiry they were unreachable garbage that only a manual `SCAN` could find
 - **DAG metadata leak on dead-letter** — `propagateFailure` never deleted the failed parent's `:dependents` set, and its `allow_failure` branch never deleted the promoted dependent's `:deps` set
 
+### Documentation
+- **Retention memory tuning** — README documents the measured cost of a retained job (~1.3 KB) and how `hash-max-listpack-value` roughly halves the hash cost with no code change. A single field value over the 64 B default converts the whole job hash from `listpack` to `hashtable`, and a job's `payload` almost always exceeds it. Includes the measured latency trade-off (`listpack` is slightly faster for `HGETALL`, −7% throughput for a worst-case single-field `HGET` at identical p50) and the caveat that the setting is per-instance. GQM never sets it for you
+
 ### Notes
 - Retention only ever applies to terminal jobs. Non-terminal jobs carry no expiry, which also keeps them outside the candidate set of Redis `volatile-*` eviction policies
 - `admin_retry` issues `PERSIST` on the job hash: `HSET` does not clear a TTL, so a retried dead-letter job would otherwise inherit its expiry and could vanish while queued or running
+- Measuring retained cost requires `MEMORY USAGE <key> SAMPLES 0`. The default samples 5 fields and extrapolates, which misreports a job hash by up to 49% because `payload` dwarfs the other fields
 
 ## [0.1.2] — 2026-02-24
 
