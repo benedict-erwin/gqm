@@ -42,6 +42,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **DAG metadata leak on dead-letter** — `propagateFailure` never deleted the failed parent's `:dependents` set, and its `allow_failure` branch never deleted the promoted dependent's `:deps` set
 
 ### Documentation
+- **Job payload visibility contract** — README now states plainly that roles limit actions, not visibility: any monitoring credential, `viewer` included, can read every job's `payload`, `result`, `meta` and error message, while `admin` gates only destructive operations. That is deliberate, and it makes the contract run the other way — do not put secrets in a payload. Includes the reference pattern (store an ID, resolve it in the handler) and a test pinning the documented behaviour, so the docs cannot drift from the code in either direction
 - **Retention memory tuning** — README documents the measured cost of a retained job (~1.3 KB) and how `hash-max-listpack-value` roughly halves the hash cost with no code change. A single field value over the 64 B default converts the whole job hash from `listpack` to `hashtable`, and a job's `payload` almost always exceeds it. Includes the measured latency trade-off (`listpack` is slightly faster for `HGETALL`, −7% throughput for a worst-case single-field `HGET` at identical p50) and the caveat that the setting is per-instance. GQM never sets it for you
 
 ### Notes

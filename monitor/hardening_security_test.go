@@ -412,3 +412,54 @@ func TestSecurity_RequireAdminCSRFUnchanged(t *testing.T) {
 		t.Error("admin route with CSRF header was still refused")
 	}
 }
+
+// --- The documented visibility contract ---
+//
+// README states plainly that roles limit actions, not visibility: any
+// monitoring credential, viewer included, reads payload, result, meta and
+// error. That is deliberate — a monitoring tool whose operator cannot see why a
+// job failed is not much use — and the contract it creates is "do not put
+// secrets in a payload".
+//
+// This test exists so the documentation cannot quietly drift from the code in
+// either direction: if payload were filtered for viewers the README would be
+// wrong and the dashboard would lose data, and if the claim were removed
+// without changing behaviour operators would be misled about what a viewer
+// credential can see.
+func TestSecurity_ViewerCanReadJobPayload_DocumentedContract(t *testing.T) {
+	const key = "gqm_ak_viewer_key_at_least_32_characters_long"
+	cfg := Config{
+		AuthEnabled: true,
+		APIKeys:     []AuthAPIKey{{Name: "readonly", Key: key, Role: "viewer"}},
+	}
+	m, rdb := testMonitorWithAdmin(t, cfg, &mockAdmin{})
+	ctx := context.Background()
+
+	if err := rdb.HSet(ctx, m.key("job", "doc-job-1"),
+		"id", "doc-job-1",
+		"type", "test.job",
+		"status", "dead_letter",
+		"payload", `{"account_id":"acct_123"}`,
+		"result", `{"ok":false}`,
+		"meta", `{"tenant":"acme"}`,
+		"error", "upstream refused the request",
+	).Err(); err != nil {
+		t.Fatalf("seeding job: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/doc-job-1", nil)
+	req.Header.Set("X-API-Key", key)
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("viewer got %d reading a job, want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"acct_123", "tenant", "upstream refused"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("viewer response does not contain %q — the README contract says it should: %s",
+				want, body)
+		}
+	}
+}

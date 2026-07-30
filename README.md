@@ -579,6 +579,47 @@ scheduler:
 
 ## Monitoring
 
+### What monitoring credentials can read
+
+**Roles limit actions, not visibility.** Any monitoring credential — including
+`viewer` users and `viewer` API keys — can read every job's `payload`, `result`,
+`meta`, and error message. The `admin` role gates destructive operations such as
+retry, delete, pause and clearing the dead-letter queue; it is not a
+confidentiality boundary.
+
+That is a deliberate design decision, not an oversight: a monitoring tool whose
+operator cannot see why a job failed is not much of a monitoring tool. It does
+mean the contract runs the other way:
+
+**Do not put secrets in a job payload.** No OAuth or API tokens, no password
+reset tokens, no webhook signing secrets, no personal data you would not show
+everyone with dashboard access. The same applies to `result` and `meta`, and to
+error messages, which often quote a fragment of the payload back.
+
+Pass a reference instead, and resolve it inside the handler from the system that
+owns it:
+
+```go
+// Don't — the token is now readable by every monitoring credential,
+// and it sits in Redis for the whole retention window.
+client.Enqueue(ctx, "sync.calendar", gqm.Payload{
+    "access_token": tok,
+})
+
+// Do — store an identifier, fetch the secret where it is needed.
+client.Enqueue(ctx, "sync.calendar", gqm.Payload{
+    "account_id": "acct_123",
+})
+
+func handleSync(ctx context.Context, job *gqm.Job) (any, error) {
+    tok, err := vault.AccessToken(ctx, job.Payload["account_id"].(string))
+    // ...
+}
+```
+
+This also keeps payloads small, which matters because retained terminal jobs
+stay in Redis for `result_ttl` / `failure_ttl` — see [Job Retention](#job-retention).
+
 ### Web Dashboard
 
 Embedded vanilla HTML/CSS/JS dashboard — no build step, no npm. Served directly from the Go binary via `embed.FS`.
