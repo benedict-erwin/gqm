@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/benedict-erwin/gqm/lua"
+	"github.com/redis/go-redis/v9"
 )
 
 // scriptRegistry holds loaded Lua scripts keyed by name.

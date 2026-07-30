@@ -32,9 +32,9 @@ const (
 
 // pool manages a set of worker goroutines for processing jobs.
 type pool struct {
-	cfg     *poolConfig
-	server  *Server
-	logger  *slog.Logger
+	cfg    *poolConfig
+	server *Server
+	logger *slog.Logger
 
 	// activeJobs tracks which worker is processing which job.
 	// Protected by mu. Worker goroutine Lock() on update, heartbeat RLock() on read.
@@ -910,4 +910,3 @@ func (p *pool) sendHeartbeat(ctx context.Context) {
 		}
 	}
 }
-

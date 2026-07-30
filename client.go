@@ -11,7 +11,7 @@ import (
 
 // Client is used to enqueue jobs into the queue system.
 type Client struct {
-	rc         *RedisClient
+	rc          *RedisClient
 	knownQueues sync.Map // tracks queues already registered via SADD
 }
 

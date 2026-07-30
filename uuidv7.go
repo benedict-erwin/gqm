@@ -17,9 +17,9 @@ func NewUUID() string {
 }
 
 var (
-	uuidMu   sync.Mutex
-	lastMS   int64
-	uuidSeq  uint16
+	uuidMu  sync.Mutex
+	lastMS  int64
+	uuidSeq uint16
 )
 
 func newUUIDAt(t time.Time) string {

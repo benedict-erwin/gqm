@@ -235,9 +235,9 @@ func WithAPIKeys(keys []AuthAPIKey) ServerOption {
 
 // Server manages worker pools and processes jobs.
 type Server struct {
-	cfg      *serverConfig
-	rc       *RedisClient
-	scripts  *scriptRegistry
+	cfg            *serverConfig
+	rc             *RedisClient
+	scripts        *scriptRegistry
 	handlers       map[string]Handler
 	handlerConfigs map[string]*handlerConfig
 	middlewares    []MiddlewareFunc
@@ -268,9 +268,9 @@ type Server struct {
 	serverID  string
 	startedAt time.Time
 
-	mu      sync.RWMutex
-	running bool
-	stopCh  chan struct{}
+	mu       sync.RWMutex
+	running  bool
+	stopCh   chan struct{}
 	stopOnce sync.Once
 }
 
@@ -307,17 +307,17 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 	serverID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
 
 	s := &Server{
-		cfg:         cfg,
-		rc:          rc,
-		scripts:     sr,
+		cfg:            cfg,
+		rc:             rc,
+		scripts:        sr,
 		handlers:       make(map[string]Handler),
 		handlerConfigs: make(map[string]*handlerConfig),
 		jobTypePool:    make(map[string]string),
-		poolNames:   make(map[string]bool),
-		cronEntries: make(map[string]*CronEntry),
-		logger:      cfg.logger,
-		serverID:    serverID,
-		stopCh:      make(chan struct{}),
+		poolNames:      make(map[string]bool),
+		cronEntries:    make(map[string]*CronEntry),
+		logger:         cfg.logger,
+		serverID:       serverID,
+		stopCh:         make(chan struct{}),
 	}
 
 	// Initialize monitor if API is enabled

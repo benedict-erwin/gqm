@@ -84,7 +84,7 @@ func (m *Monitor) setupRoutes() {
 
 // response is the standard JSON envelope for successful responses.
 type response struct {
-	Data any  `json:"data"`
+	Data any   `json:"data"`
 	Meta *meta `json:"meta,omitempty"`
 }
 

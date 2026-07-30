@@ -34,11 +34,11 @@ type RedisYAML struct {
 
 // AppConfig holds application-level settings from YAML.
 type AppConfig struct {
-	Timezone        string `yaml:"timezone"`
-	LogLevel        string `yaml:"log_level"`
-	ShutdownTimeout int    `yaml:"shutdown_timeout"`   // seconds
-	GlobalJobTimeout int   `yaml:"global_job_timeout"` // seconds
-	GracePeriod     int    `yaml:"grace_period"`       // seconds
+	Timezone         string `yaml:"timezone"`
+	LogLevel         string `yaml:"log_level"`
+	ShutdownTimeout  int    `yaml:"shutdown_timeout"`   // seconds
+	GlobalJobTimeout int    `yaml:"global_job_timeout"` // seconds
+	GracePeriod      int    `yaml:"grace_period"`       // seconds
 
 	// ResultTTL and FailureTTL are the server-wide retention defaults in
 	// seconds: how long a terminal job's hash is kept before Redis expires it.
@@ -95,8 +95,8 @@ type CronEntryYAML struct {
 	Timezone      string `yaml:"timezone"`
 	JobType       string `yaml:"job_type"`
 	Queue         string `yaml:"queue"`
-	Payload       string `yaml:"payload"`        // JSON string
-	Timeout       int    `yaml:"timeout"`        // seconds
+	Payload       string `yaml:"payload"` // JSON string
+	Timeout       int    `yaml:"timeout"` // seconds
 	MaxRetry      int    `yaml:"max_retry"`
 	OverlapPolicy string `yaml:"overlap_policy"`
 	Enabled       *bool  `yaml:"enabled"` // nil = true
@@ -120,7 +120,7 @@ type AuthConfig struct {
 type UserYAML struct {
 	Username     string `yaml:"username"`
 	PasswordHash string `yaml:"password_hash"` // bcrypt hash
-	Role         string `yaml:"role"`           // "admin" or "viewer"; defaults to "admin"
+	Role         string `yaml:"role"`          // "admin" or "viewer"; defaults to "admin"
 }
 
 // APIConfig holds HTTP API settings from YAML.

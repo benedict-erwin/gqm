@@ -192,10 +192,10 @@ func TestResolveMaxRetry(t *testing.T) {
 		want       int
 	}{
 		{
-			name:   "job-level takes priority",
-			jobMax: 5,
+			name:       "job-level takes priority",
+			jobMax:     5,
 			poolPolicy: &RetryPolicy{MaxRetry: 3},
-			want:   5,
+			want:       5,
 		},
 		{
 			name:       "pool-level when job is 0",

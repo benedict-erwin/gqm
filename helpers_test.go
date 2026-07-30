@@ -85,8 +85,8 @@ func TestValidateJobInputs_InvalidJobID(t *testing.T) {
 
 func TestValidateJobInputs_InvalidDependsOn(t *testing.T) {
 	tests := []struct {
-		name    string
-		deps    []string
+		name string
+		deps []string
 	}{
 		{"empty dep ID", []string{""}},
 		{"invalid chars in dep", []string{"dep/bad"}},
@@ -103,15 +103,15 @@ func TestValidateJobInputs_InvalidDependsOn(t *testing.T) {
 
 func TestNewLoggerFromLevel(t *testing.T) {
 	tests := []struct {
-		level    string
-		wantNil  bool
+		level   string
+		wantNil bool
 	}{
-		{"", false},       // default logger
+		{"", false}, // default logger
 		{"debug", false},
 		{"info", false},
 		{"warn", false},
 		{"error", false},
-		{"DEBUG", false},  // case insensitive
+		{"DEBUG", false},   // case insensitive
 		{"unknown", false}, // falls back to default
 	}
 	for _, tt := range tests {

@@ -335,7 +335,7 @@ func (se *schedulerEngine) enqueueCronJob(ctx context.Context, entry *CronEntry,
 	pipe.SAdd(ctx, queuesKey, job.Queue)
 	pipe.ZAdd(ctx, historyKey, redis.Z{Score: float64(now.Unix()), Member: job.ID})
 	pipe.ZRemRangeByRank(ctx, historyKey, 0, -1001) // Trim to last 1000 entries
-	pipe.Set(ctx, currentKey, job.ID, 0)             // Track current job for overlap detection
+	pipe.Set(ctx, currentKey, job.ID, 0)            // Track current job for overlap detection
 	if _, err := pipe.Exec(ctx); err != nil {
 		if ctx.Err() == nil {
 			se.logger.Error("enqueuing cron job", "entry_id", entry.ID, "error", err)

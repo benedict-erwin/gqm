@@ -53,9 +53,9 @@ const (
 // When set on a pool, it serves as the default for all jobs in that pool
 // unless overridden at the job level.
 type RetryPolicy struct {
-	MaxRetry   int
-	Intervals  []int         // Explicit intervals in seconds (for BackoffCustom)
-	Backoff    BackoffType   // fixed, exponential, custom
+	MaxRetry    int
+	Intervals   []int         // Explicit intervals in seconds (for BackoffCustom)
+	Backoff     BackoffType   // fixed, exponential, custom
 	BackoffBase time.Duration // Base delay for fixed/exponential
 	BackoffMax  time.Duration // Maximum delay cap for exponential
 }
@@ -116,7 +116,7 @@ func (pc PoolConfig) toInternal(serverGracePeriod time.Duration) *poolConfig {
 // poolConfig holds the configuration for a worker pool.
 type poolConfig struct {
 	name            string
-	queues          []string        // Queues to listen on, ordered by priority
+	queues          []string // Queues to listen on, ordered by priority
 	concurrency     int
 	jobTimeout      time.Duration
 	gracePeriod     time.Duration

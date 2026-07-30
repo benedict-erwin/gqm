@@ -236,19 +236,19 @@ func TestCronExpr_Next(t *testing.T) {
 		{
 			name: "day of week Monday",
 			expr: "0 0 0 * * 1",
-			from: base, // Thursday Jan 1
+			from: base,                                   // Thursday Jan 1
 			want: time.Date(2026, 1, 5, 0, 0, 0, 0, utc), // Monday
 		},
 		{
 			name: "day of week Sunday via 7",
 			expr: "0 0 0 * * 7",
-			from: base, // Thursday Jan 1
+			from: base,                                   // Thursday Jan 1
 			want: time.Date(2026, 1, 4, 0, 0, 0, 0, utc), // Sunday
 		},
 		{
 			name: "dom AND dow OR semantics: 1st OR Monday",
 			expr: "0 0 0 1 * 1",
-			from: base, // Thursday Jan 1 00:00:00, Next starts from 00:00:01
+			from: base,                                   // Thursday Jan 1 00:00:00, Next starts from 00:00:01
 			want: time.Date(2026, 1, 5, 0, 0, 0, 0, utc), // Monday Jan 5
 		},
 		{
@@ -260,7 +260,7 @@ func TestCronExpr_Next(t *testing.T) {
 		{
 			name: "dow list Mon Wed Fri",
 			expr: "0 0 0 * * 1,3,5",
-			from: base, // Thursday Jan 1
+			from: base,                                   // Thursday Jan 1
 			want: time.Date(2026, 1, 2, 0, 0, 0, 0, utc), // Friday
 		},
 		{
