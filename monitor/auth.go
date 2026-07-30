@@ -58,8 +58,19 @@ func (m *Monitor) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		if cookie, err := r.Cookie(sessionCookieName); err == nil {
 			username, err := m.validateSession(r.Context(), cookie.Value)
 			if err == nil {
+				role, ok := m.userRole(username)
+				if !ok {
+					// The user was removed or renamed in config. Revoke the
+					// orphaned session rather than leaving it valid until its
+					// TTL expires, so removing a user takes effect at once.
+					m.rdb.Del(r.Context(), m.key("session", cookie.Value))
+					m.logger.Warn("revoked session for a user no longer in config",
+						"username", username)
+					writeError(w, http.StatusUnauthorized, "unauthorized", "UNAUTHORIZED")
+					return
+				}
 				r.Header.Set("X-GQM-User", username)
-				r.Header.Set("X-GQM-Role", m.userRole(username))
+				r.Header.Set("X-GQM-Role", role)
 				next(w, r)
 				return
 			}
@@ -114,20 +125,31 @@ func (m *Monitor) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// userRole returns the effective role for a username. Defaults to "admin" if not set.
-func (m *Monitor) userRole(username string) string {
+// userRole returns the effective role for a username, and whether that username
+// is still configured.
+//
+// The caller must treat ok=false as a rejection. Sessions live in Redis and
+// outlive a config change, so a username removed or renamed in config can still
+// present a valid session token; resolving that to a role rather than refusing
+// it would let a revoked account keep working, and — if the fallback were the
+// highest privilege — hand it more access than it started with.
+func (m *Monitor) userRole(username string) (string, bool) {
 	for _, u := range m.cfg.AuthUsers {
 		if u.Username == username {
-			return effectiveRole(u.Role)
+			return effectiveRole(u.Role), true
 		}
 	}
-	return "admin"
+	return "", false
 }
 
-// effectiveRole returns the role, defaulting to "admin" if empty (backward compat).
+// effectiveRole returns the role, defaulting to the least privilege when unset.
+//
+// An omitted role is an operator who did not say what they meant. Reading that
+// as "admin" grants full destructive access to a credential nobody deliberately
+// privileged, so an unset role resolves to viewer instead.
 func effectiveRole(role string) string {
 	if role == "" {
-		return "admin"
+		return "viewer"
 	}
 	return role
 }

@@ -2160,7 +2160,15 @@ func TestSecurity_RBAC_AdminCanWrite(t *testing.T) {
 	rdb.Del(ctx, m.key("session", token))
 }
 
-func TestSecurity_RBAC_DefaultRoleIsAdmin(t *testing.T) {
+// A user configured without an explicit role gets the least privilege, not the
+// most. An omitted role is an operator who did not say what they meant, and
+// reading that as "admin" would hand full destructive access to a credential
+// nobody deliberately privileged.
+//
+// This replaces an earlier test that asserted the opposite. That contract was
+// the fail-open default the 2026-07-30 audit flagged, not a property worth
+// keeping.
+func TestSecurity_RBAC_DefaultRoleIsViewer(t *testing.T) {
 	m, rdb := testMonitor(t, Config{
 		AuthEnabled:    true,
 		AuthSessionTTL: 3600,
@@ -2170,15 +2178,20 @@ func TestSecurity_RBAC_DefaultRoleIsAdmin(t *testing.T) {
 	})
 	m.startedAt = time.Now()
 
-	// Create a session for user with no explicit role
 	ctx := context.Background()
 	token := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	rdb.Set(ctx, m.key("session", token), "olduser", time.Hour)
 
-	// Should default to admin role — not blocked from write endpoints
+	// Write endpoints are refused...
 	w := doRequestWithCookieCSRF(m, "POST", "/api/v1/jobs/test-id/retry", token)
-	if w.Code == http.StatusForbidden {
-		t.Fatalf("default role user: status = 403, should default to admin")
+	if w.Code != http.StatusForbidden {
+		t.Errorf("role-less user on a write endpoint: status = %d, want 403", w.Code)
+	}
+
+	// ...but reads still work, so the account is limited rather than useless.
+	r := doRequestWithCookie(m, "GET", "/api/v1/queues", token)
+	if r.Code != http.StatusOK {
+		t.Errorf("role-less user on a read endpoint: status = %d, want 200", r.Code)
 	}
 
 	rdb.Del(ctx, m.key("session", token))
@@ -4375,15 +4388,18 @@ func TestLogin_InvalidJSON(t *testing.T) {
 	}
 }
 
-// userRole edge case: user not found defaults to admin
+// userRole must fail closed. A username that is no longer configured cannot be
+// resolved to any role: sessions outlive config changes, so treating an unknown
+// user as valid would keep a revoked account working, and resolving it to the
+// highest privilege would hand it more access than it had before revocation.
 
-func TestUserRole_NotFound(t *testing.T) {
+func TestUserRole_NotFoundIsRejected(t *testing.T) {
 	m, _ := testMonitor(t, Config{
 		AuthUsers: []AuthUser{{Username: "alice", Role: "viewer"}},
 	})
-	got := m.userRole("unknown")
-	if got != "admin" {
-		t.Errorf("role = %q, want admin", got)
+	got, ok := m.userRole("unknown")
+	if ok {
+		t.Errorf("unknown user resolved to %q, want rejection", got)
 	}
 }
 
@@ -4391,9 +4407,21 @@ func TestUserRole_FoundWithRole(t *testing.T) {
 	m, _ := testMonitor(t, Config{
 		AuthUsers: []AuthUser{{Username: "alice", Role: "viewer"}},
 	})
-	got := m.userRole("alice")
-	if got != "viewer" {
-		t.Errorf("role = %q, want viewer", got)
+	got, ok := m.userRole("alice")
+	if !ok || got != "viewer" {
+		t.Errorf("role = %q ok = %v, want viewer true", got, ok)
+	}
+}
+
+// An omitted role is an operator who did not say what they meant, so it
+// resolves to the least privilege rather than the most.
+func TestUserRole_EmptyRoleIsViewer(t *testing.T) {
+	m, _ := testMonitor(t, Config{
+		AuthUsers: []AuthUser{{Username: "bob"}},
+	})
+	got, ok := m.userRole("bob")
+	if !ok || got != "viewer" {
+		t.Errorf("role = %q ok = %v, want viewer true", got, ok)
 	}
 }
 
