@@ -14,6 +14,32 @@
 #
 # Exit code 0 means every check passed. Any failure exits non-zero and prints
 # what was expected against what happened.
+#
+# ---------------------------------------------------------------------------
+# ADDING A CHECK — required for every security fix
+#
+# This script must cover every security fix that has ever landed, not just the
+# most recent one, so that a regression in an old fix is caught too. When you
+# fix a finding:
+#
+#   1. Add a section headed with the finding id, following the existing shape:
+#        head_ "M-03  <one line saying what must hold>"
+#        ... probe ...
+#        ok "..."   on success
+#        bad "..." "<expected>" "<actual>"   on failure
+#
+#   2. Prove the new check is load-bearing. Revert the fix, run the script, and
+#      confirm the new check goes red:
+#        git checkout <commit-before-fix> -- <files>
+#        bash scripts/verify-security-fixes.sh     # new check must FAIL
+#        git checkout HEAD -- <files>              # restore
+#      A check that never fails proves nothing. Green is not evidence on its
+#      own — that has been misleading more than once in this project.
+#
+#   3. Assert the fix does not break what it protects. Every hardening section
+#      here also checks that the legitimate path still works, which is what
+#      catches an over-broad fix.
+# ---------------------------------------------------------------------------
 
 set -uo pipefail
 
