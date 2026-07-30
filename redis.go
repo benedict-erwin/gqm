@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -173,4 +175,52 @@ func queueRetention(ctx context.Context, pipe redis.Pipeliner, jobKey string, tt
 	case ttl > 0:
 		pipe.Expire(ctx, jobKey, time.Duration(ttl)*time.Second)
 	}
+}
+
+// warnIfUnprotected writes a deliberately loud banner when Redis is reachable
+// without a password.
+//
+// This is not a hypothetical: GQM stores dashboard session tokens in Redis as
+// gqm:session:<token>. Anyone who can read the database can lift a token and
+// use it as a cookie, which bypasses the authentication layer entirely rather
+// than attacking it. Job payloads are readable the same way, and a writer can
+// inject jobs that the application's own handlers will then execute.
+//
+// Starting without a password stays allowed — plenty of setups run Redis on a
+// private network — but the operator should make that choice knowingly rather
+// than inherit it from a default.
+//
+// The banner goes to the given writer (os.Stderr in practice) instead of the
+// configured slog logger, because a warning that log_level can silence is not a
+// warning. Production configurations commonly set the level to error, which is
+// exactly the situation where this most needs to be seen. It is not logged at
+// Error level either: this is not an error, and misclassifying it would pollute
+// error metrics and alerting.
+func (rc *RedisClient) warnIfUnprotected(w io.Writer, authEnabled bool) {
+	opts := rc.rdb.Options()
+	if opts == nil || opts.Password != "" {
+		return
+	}
+
+	rule := strings.Repeat("!", 74)
+	var b strings.Builder
+	b.WriteString("\n" + rule + "\n")
+	b.WriteString("!! REDIS HAS NO PASSWORD  \u2014  addr: " + opts.Addr + "\n!!\n")
+	if isLoopbackAddr(opts.Addr) {
+		b.WriteString("!! Any process on this host can read and write every queue.\n")
+	} else {
+		b.WriteString("!! This address is NOT loopback. Anything that can route to it has full\n")
+		b.WriteString("!! read/write access to every queue, with no credentials at all.\n")
+	}
+	if authEnabled {
+		b.WriteString("!!\n")
+		b.WriteString("!! Dashboard session tokens are stored in Redis. Reading one is enough to\n")
+		b.WriteString("!! become an authenticated admin \u2014 the login page is bypassed, not broken.\n")
+	}
+	b.WriteString("!!\n")
+	b.WriteString("!! Job payloads are readable, and injected jobs run in your own handlers.\n")
+	b.WriteString("!!\n")
+	b.WriteString("!! Fix: set redis.password (or Redis ACLs); add redis.tls for remote Redis.\n")
+	b.WriteString(rule + "\n\n")
+	_, _ = io.WriteString(w, b.String())
 }

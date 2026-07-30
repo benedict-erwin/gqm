@@ -501,6 +501,8 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("redis connection check: %w", err)
 	}
 
+	s.rc.warnIfUnprotected(os.Stderr, s.cfg.authEnabled)
+
 	// Ensure a default pool exists for handlers without Workers()
 	s.ensureDefaultPool()
 

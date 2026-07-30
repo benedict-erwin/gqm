@@ -28,13 +28,18 @@
 #        ok "..."   on success
 #        bad "..." "<expected>" "<actual>"   on failure
 #
-#   2. Prove the new check is load-bearing. Revert the fix, run the script, and
+#   2. Prove the new check is load-bearing. Disable the fix, run the script, and
 #      confirm the new check goes red:
-#        git checkout <commit-before-fix> -- <files>
-#        bash scripts/verify-security-fixes.sh     # new check must FAIL
-#        git checkout HEAD -- <files>              # restore
+#        cp <file> /tmp/backup-<file>            # ALWAYS back up first
+#        # ...disable the fix, e.g. git checkout <commit> -- <file>...
+#        bash scripts/verify-security-fixes.sh   # the new check must FAIL
+#        cp /tmp/backup-<file> <file>            # restore from the backup
 #      A check that never fails proves nothing. Green is not evidence on its
 #      own — that has been misleading more than once in this project.
+#
+#      `git checkout -- <file>` overwrites the working copy with no way back and
+#      will DESTROY uncommitted work. It is only safe once the fix is committed.
+#      Backing up first costs nothing and has already saved this exact mistake.
 #
 #   3. Assert the fix does not break what it protects. Every hardening section
 #      here also checks that the legitimate path still works, which is what
@@ -99,10 +104,51 @@ func main() {
 }
 GOF
 
+# A tiny Redis helper, because redis-cli is not installed in the devcontainer
+# and the checks need to seed and inspect keys directly.
+mkdir -p "$WORK/redisctl"
+cat > "$WORK/redisctl/main.go" <<'GOF'
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+func main() {
+	rdb := redis.NewClient(&redis.Options{Addr: os.Args[1]})
+	ctx := context.Background()
+	switch os.Args[2] {
+	case "set": // set <key> <value>
+		if err := rdb.Set(ctx, os.Args[3], os.Args[4], time.Hour).Err(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "exists": // exists <key> -> prints 0 or 1
+		n, err := rdb.Exists(ctx, os.Args[3]).Result()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(n)
+	case "del": // del <key>
+		rdb.Del(ctx, os.Args[3])
+	}
+}
+GOF
+
 printf 'Building harness...\n'
 if ! go build -buildvcs=false -o "$WORK/harness/server" "$WORK/harness/main.go" 2>"$WORK/build.err"; then
   printf '\033[31mharness build failed\033[0m\n'; cat "$WORK/build.err"; exit 1
 fi
+if ! go build -buildvcs=false -o "$WORK/redisctl/redisctl" "$WORK/redisctl/main.go" 2>>"$WORK/build.err"; then
+  printf '\033[31mredisctl build failed\033[0m\n'; cat "$WORK/build.err"; exit 1
+fi
+rctl() { "$WORK/redisctl/redisctl" "$REDIS_ADDR" "$@"; }
 
 write_config() { # $1=path  $2=addr  $3=extra yaml under monitoring
   cat > "$1" <<YAML
@@ -265,6 +311,69 @@ if start_server "$WORK/dash.yaml"; then
   stop_server
 else
   bad "dashboard server starts" "server starts with custom_dir" "refused: $(head -c 200 "$WORK/err.log")"
+fi
+
+# ===========================================================================
+head_ "M-01  A revoked user's session must stop working immediately"
+# ===========================================================================
+# Sessions live in Redis and survive config changes, so removing a user only
+# counts as revocation if the session token stops authenticating.
+
+cat > "$WORK/revoke.yaml" <<YAML
+redis:
+  addr: "$REDIS_ADDR"
+  prefix: "gqm:verify:"
+app:
+  log_level: "error"
+monitoring:
+  api:
+    enabled: true
+    addr: "127.0.0.1:$PORT"
+  auth:
+    enabled: true
+    users:
+      - username: "alice"
+        password_hash: "\$2a\$10\$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+        role: "viewer"
+YAML
+
+# "bob" is not in that config. Seed a session for him, as if he had been
+# removed after logging in.
+BOB_TOKEN="aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff0000000011111111"
+rctl set "gqm:verify:session:$BOB_TOKEN" "bob"
+
+if start_server "$WORK/revoke.yaml"; then
+  c=$(code -X DELETE -H "X-GQM-CSRF: 1" -H "Cookie: gqm_session=$BOB_TOKEN" \
+        "http://127.0.0.1:$PORT/api/v1/queues/default/empty")
+  [[ "$c" == "401" ]] && ok "revoked user's session is rejected (401)" \
+                      || bad "revoked user's session is rejected" "401" "$c"
+
+  left=$(rctl exists "gqm:verify:session:$BOB_TOKEN")
+  [[ "$left" == "0" ]] && ok "orphaned session is deleted, not merely refused" \
+                       || bad "orphaned session is deleted" "key gone" "still present"
+  stop_server
+else
+  bad "revocation server starts" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
+fi
+rctl del "gqm:verify:session:$BOB_TOKEN"
+
+# ===========================================================================
+head_ "I-06  Redis without a password must warn loudly"
+# ===========================================================================
+# Allowed by decision, but the operator has to be told: session tokens live in
+# Redis, so an unprotected Redis bypasses authentication rather than breaking it.
+
+write_config "$WORK/nopass.yaml" "127.0.0.1:$PORT" ""
+if start_server "$WORK/nopass.yaml"; then
+  ok "server still starts with an unprotected Redis (allowed by design)"
+  if grep -q "REDIS HAS NO PASSWORD" "$WORK/err.log" "$WORK/out.log" 2>/dev/null; then
+    ok "startup warns that Redis has no password"
+  else
+    bad "startup warns that Redis has no password" "a REDIS HAS NO PASSWORD banner" "no such warning in the logs"
+  fi
+  stop_server
+else
+  bad "unprotected Redis still allowed to start" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
 fi
 
 # ===========================================================================
