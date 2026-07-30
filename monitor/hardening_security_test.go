@@ -1,11 +1,13 @@
 package monitor
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -301,4 +303,112 @@ func TestSecurity_SessionCookieSecureFlag(t *testing.T) {
 			}
 		}
 	})
+}
+
+// --- I-05: logout is state-changing, so it needs the CSRF header too ---
+//
+// Not exploitable today: a cross-site POST carries no SameSite=Lax cookie, so a
+// forced logout fails before it reaches the handler. But logout was the only
+// authenticated state-changing route resting on SameSite alone, while every
+// other one had a second layer. Defence in depth is not defence if one route
+// quietly opts out.
+
+func TestSecurity_LogoutRequiresCSRFHeader(t *testing.T) {
+	cfg := Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 86400,
+		AuthUsers:      []AuthUser{{Username: "alice", PasswordHash: "$2a$10$x", Role: "viewer"}},
+	}
+	m, rdb := testMonitorWithAdmin(t, cfg, &mockAdmin{})
+	ctx := context.Background()
+
+	token := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	key := m.key("session", token)
+	if err := rdb.Set(ctx, key, "alice", time.Hour).Err(); err != nil {
+		t.Fatalf("seeding session: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("logout without CSRF header got %d, want 403", w.Code)
+	}
+	// The session must survive a refused logout, or the refusal accomplished
+	// exactly what the attack wanted.
+	if n, _ := rdb.Exists(ctx, key).Result(); n != 1 {
+		t.Error("session was destroyed by a logout that was supposed to be refused")
+	}
+}
+
+// The dashboard sends the header on every non-GET, so logout must keep working.
+func TestSecurity_LogoutWorksWithCSRFHeader(t *testing.T) {
+	cfg := Config{
+		AuthEnabled:    true,
+		AuthSessionTTL: 86400,
+		AuthUsers:      []AuthUser{{Username: "alice", PasswordHash: "$2a$10$x", Role: "viewer"}},
+	}
+	m, rdb := testMonitorWithAdmin(t, cfg, &mockAdmin{})
+	ctx := context.Background()
+
+	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	key := m.key("session", token)
+	if err := rdb.Set(ctx, key, "alice", time.Hour).Err(); err != nil {
+		t.Fatalf("seeding session: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	req.Header.Set("X-GQM-CSRF", "1")
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout with CSRF header got %d, want 200", w.Code)
+	}
+	if n, _ := rdb.Exists(ctx, key).Result(); n != 0 {
+		t.Error("session still present after a successful logout")
+	}
+}
+
+// API keys stay exempt, matching requireAdmin: browsers do not attach them
+// automatically, so they are not a CSRF vector.
+func TestSecurity_LogoutAPIKeyExemptFromCSRF(t *testing.T) {
+	const key = "gqm_ak_test_key_at_least_32_characters_long"
+	cfg := Config{
+		AuthEnabled: true,
+		APIKeys:     []AuthAPIKey{{Name: "ci", Key: key, Role: "admin"}},
+	}
+	m, _ := testMonitorWithAdmin(t, cfg, &mockAdmin{})
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("X-API-Key", key)
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+
+	if w.Code == http.StatusForbidden {
+		t.Error("API key logout was refused for a missing CSRF header")
+	}
+}
+
+// requireAdmin must behave exactly as before now that it delegates the check.
+func TestSecurity_RequireAdminCSRFUnchanged(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{}, &mockAdmin{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/queues/default/empty", nil)
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("admin route without CSRF got %d, want 403", w.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodDelete, "/api/v1/queues/default/empty", nil)
+	req2.Header.Set("X-GQM-CSRF", "1")
+	w2 := httptest.NewRecorder()
+	m.mux.ServeHTTP(w2, req2)
+	if w2.Code == http.StatusForbidden {
+		t.Error("admin route with CSRF header was still refused")
+	}
 }

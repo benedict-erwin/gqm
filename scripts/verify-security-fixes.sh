@@ -274,6 +274,36 @@ $3
 YAML
 }
 
+# Cost 4 keeps the harness fast; this is a throwaway credential.
+HASH='$2a$04$mkaqsrvzGVI759PKhrd8yOdBSSIZ87tWEgdEnrGwFJ5g4Ywl9hP0m'
+write_auth_config() { # $1=path  $2=extra api yaml
+  cat > "$1" <<YAML
+redis:
+  addr: "$REDIS_ADDR"
+  prefix: "gqm:verify:"
+app:
+  log_level: "error"
+monitoring:
+  api:
+    enabled: true
+    addr: "127.0.0.1:$PORT"
+$2
+  auth:
+    enabled: true
+    users:
+      - username: "alice"
+        password_hash: "$HASH"
+        role: "viewer"
+YAML
+}
+
+login_cookie_flags() { # $1=extra curl args... -> prints the Set-Cookie line
+  curl -s -D - -o /dev/null -X POST \
+    -H 'Content-Type: application/json' \
+    --data '{"username":"alice","password":"verifypw"}' \
+    "$@" "http://127.0.0.1:$PORT/auth/login" | grep -i '^set-cookie:'
+}
+
 start_server() { # $1=config path -> sets SERVER_PID, returns 1 if it refused to start
   "$WORK/harness/server" "$1" >"$WORK/out.log" 2>"$WORK/err.log" &
   SERVER_PID=$!
@@ -486,42 +516,48 @@ else
 fi
 
 # ===========================================================================
+head_ "I-05  Logout changes state, so it needs the CSRF header too"
+# ===========================================================================
+# Not exploitable today — a cross-site POST carries no SameSite=Lax cookie —
+# but logout was the only authenticated state-changing route resting on
+# SameSite alone while every other one had two layers.
+
+I05_TOKEN="1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+write_auth_config "$WORK/logout.yaml" ""
+rctl set "gqm:verify:session:$I05_TOKEN" "alice"
+
+if start_server "$WORK/logout.yaml"; then
+  c=$(code -X POST -H "Cookie: gqm_session=$I05_TOKEN" "http://127.0.0.1:$PORT/auth/logout")
+  [[ "$c" == "403" ]] && ok "logout without the CSRF header is refused (403)" \
+                      || bad "logout without the CSRF header is refused" "403" "$c"
+
+  # A refused logout must not have logged the user out anyway, or the refusal
+  # achieved exactly what the attack wanted.
+  left=$(rctl exists "gqm:verify:session:$I05_TOKEN")
+  [[ "$left" == "1" ]] && ok "the session survives a refused logout" \
+                       || bad "the session survives a refused logout" "key still present" "session was destroyed"
+
+  # The dashboard sends the header on every non-GET, so this path must work.
+  c=$(code -X POST -H 'X-GQM-CSRF: 1' -H "Cookie: gqm_session=$I05_TOKEN" \
+        "http://127.0.0.1:$PORT/auth/logout")
+  [[ "$c" == "200" ]] && ok "logout with the CSRF header still works" \
+                      || bad "logout with the CSRF header still works" "200" "$c"
+  left=$(rctl exists "gqm:verify:session:$I05_TOKEN")
+  [[ "$left" == "0" ]] && ok "a successful logout deletes the session" \
+                       || bad "a successful logout deletes the session" "key gone" "still present"
+  stop_server
+else
+  bad "logout server starts" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
+fi
+rctl del "gqm:verify:session:$I05_TOKEN"
+
+# ===========================================================================
 head_ "I-01  A client header must not decide the session cookie's Secure flag"
 # ===========================================================================
 # X-Forwarded-Proto is supplied by the client. Trusting it unconditionally fails
 # safe on its own, but the knobs that replace it exist for the opposite case:
 # behind a proxy that terminates TLS and sends no header, the cookie went out
 # without Secure and the browser would send the token over plain HTTP.
-
-# Cost 4 keeps the harness fast; this is a throwaway credential.
-HASH='$2a$04$mkaqsrvzGVI759PKhrd8yOdBSSIZ87tWEgdEnrGwFJ5g4Ywl9hP0m'
-write_auth_config() { # $1=path  $2=extra api yaml
-  cat > "$1" <<YAML
-redis:
-  addr: "$REDIS_ADDR"
-  prefix: "gqm:verify:"
-app:
-  log_level: "error"
-monitoring:
-  api:
-    enabled: true
-    addr: "127.0.0.1:$PORT"
-$2
-  auth:
-    enabled: true
-    users:
-      - username: "alice"
-        password_hash: "$HASH"
-        role: "viewer"
-YAML
-}
-
-login_cookie_flags() { # $1=extra curl args... -> prints the Set-Cookie line
-  curl -s -D - -o /dev/null -X POST \
-    -H 'Content-Type: application/json' \
-    --data '{"username":"alice","password":"verifypw"}' \
-    "$@" "http://127.0.0.1:$PORT/auth/login" | grep -i '^set-cookie:'
-}
 
 write_auth_config "$WORK/xfp-default.yaml" ""
 if start_server "$WORK/xfp-default.yaml"; then

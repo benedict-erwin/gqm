@@ -324,9 +324,13 @@ func TestAuth_Logout(t *testing.T) {
 		}
 	}
 
-	// Logout
+	// Logout. The CSRF header is incidental to what this test checks — that
+	// logout deletes the session — but logout now requires it, exactly as the
+	// dashboard sends it on every non-GET. TestSecurity_LogoutRequiresCSRFHeader
+	// is what pins the requirement itself.
 	req := httptest.NewRequest("POST", "/auth/logout", nil)
 	req.Header.Set("Cookie", sessionCookieName+"="+sessionToken)
+	req.Header.Set("X-GQM-CSRF", "1")
 	w := httptest.NewRecorder()
 	m.mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -5166,10 +5170,12 @@ func TestLogout_HTTPS(t *testing.T) {
 		t.Fatal("no session token from login")
 	}
 
-	// Logout over HTTPS
+	// Logout over HTTPS. This test is about the cookie flags; the CSRF header
+	// is setup, not the subject.
 	req := httptest.NewRequest("POST", "/auth/logout", nil)
 	req.TLS = &tls.ConnectionState{}
 	req.Header.Set("Cookie", sessionCookieName+"="+sessionToken)
+	req.Header.Set("X-GQM-CSRF", "1")
 	w := httptest.NewRecorder()
 	m.mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

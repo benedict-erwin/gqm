@@ -101,26 +101,36 @@ func (m *Monitor) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "admin role required", "FORBIDDEN")
 			return
 		}
+		m.requireCSRF(next)(w, r)
+	}
+}
 
-		// CSRF protection: require X-GQM-CSRF header for session-cookie auth.
-		// Custom headers cannot be set cross-origin without CORS preflight
-		// (which we don't enable), so this prevents CSRF even if SameSite
-		// is somehow bypassed. A static value is sufficient because the
-		// protection comes from the header's presence, not its value.
-		//
-		// Only API key auth is exempt, because API keys are not sent
-		// automatically by browsers. An empty X-GQM-User means auth is disabled,
-		// which must still require the header: a browser reaching an
-		// unauthenticated instance is exactly the case CSRF protects against,
-		// and treating "no user" as "not a browser" would skip the check
-		// precisely where nothing else guards the request.
+// requireCSRF rejects a state-changing request that did not come with the
+// X-GQM-CSRF header.
+//
+// Custom headers cannot be set cross-origin without a CORS preflight, and none
+// is enabled here, so the header's presence is what carries the protection —
+// its value is irrelevant. This guards the request even if SameSite is somehow
+// bypassed.
+//
+// Only API key auth is exempt, because browsers do not attach API keys
+// automatically. An empty X-GQM-User means auth is disabled, which must still
+// require the header: a browser reaching an unauthenticated instance is exactly
+// the case CSRF protects against, and reading "no user" as "not a browser"
+// would skip the check precisely where nothing else guards the request.
+//
+// This lives apart from requireAdmin so that state-changing routes which are
+// not admin-only can use it. Logout is the current example; anything added
+// later that mutates state should reach for this rather than rely on SameSite
+// alone.
+func (m *Monitor) requireCSRF(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		user := r.Header.Get("X-GQM-User")
 		isCookieAuth := !strings.HasPrefix(user, "apikey:")
 		if isCookieAuth && r.Header.Get("X-GQM-CSRF") != "1" {
 			writeError(w, http.StatusForbidden, "missing CSRF header", "CSRF_REQUIRED")
 			return
 		}
-
 		next(w, r)
 	}
 }

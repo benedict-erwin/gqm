@@ -16,7 +16,11 @@ func (m *Monitor) setupRoutes() {
 
 	// Auth endpoints
 	m.mux.HandleFunc("POST /auth/login", m.handleLogin)
-	m.mux.HandleFunc("POST /auth/logout", m.requireAuth(m.handleLogout))
+	// Logout changes state, so it gets the CSRF header requirement too. Not
+	// exploitable today — a cross-site POST carries no SameSite=Lax cookie, so
+	// a forced logout fails — but it was the only authenticated state-changing
+	// route resting on SameSite alone while every other one had two layers.
+	m.mux.HandleFunc("POST /auth/logout", m.requireAuth(m.requireCSRF(m.handleLogout)))
 	m.mux.HandleFunc("GET /auth/me", m.requireAuth(m.handleMe))
 
 	// API v1 — all require auth
@@ -211,6 +215,19 @@ func validateJobIDParam(w http.ResponseWriter, name, value string) bool {
 }
 
 // handleHealth is the health check endpoint (no auth required).
+// This endpoint is deliberately unauthenticated, and deliberately still
+// reports the dependency state and uptime.
+//
+// It was reviewed as a disclosure risk and left as it is. Load balancers and
+// orchestrators need it without credentials, and what it exposes — whether
+// Redis is reachable, and how long the process has been up — is thin. Trimming
+// it for anonymous callers would change a response shape that external
+// monitoring parses, which is a real cost against a marginal gain.
+//
+// If this instance is reachable from the internet and even that is too much,
+// the answer is to keep the endpoint off the public listener rather than to
+// hollow out its body: a health check that cannot report unhealthy is not a
+// health check.
 func (m *Monitor) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
