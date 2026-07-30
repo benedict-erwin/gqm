@@ -76,7 +76,26 @@ redis:
 
 GQM prints a loud startup banner when it connects to a password-less Redis. It
 still starts — the local development case is legitimate — but the warning goes to
-stderr rather than the logger, so `log_level` cannot silence it.
+stderr rather than the logger, so `log_level` cannot silence it. It prints once
+per Redis address per process, not once per server started.
+
+If an unprotected Redis is a deliberate choice you have already weighed — a
+private network, a host you fully trust — you can say so in code and the banner
+stops:
+
+```go
+func TestMain(m *testing.M) {
+    gqm.AcknowledgeUnprotectedRedis() // silences the banner for this process
+    os.Exit(m.Run())
+}
+```
+
+That is deliberately a function call rather than a config field or an
+environment variable. It belongs in your source, where it shows up in a diff,
+survives code review, and can be found with `grep` — the same reasoning behind
+`tls.Config.InsecureSkipVerify`. A setting outside the code travels between
+environments unnoticed, which is exactly how an acknowledgement made for local
+development ends up silencing production.
 
 The bundled `docker-compose.yml` is for local development only: it publishes
 Redis on `127.0.0.1` and sets no password. Do not deploy it as-is.

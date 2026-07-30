@@ -247,6 +247,42 @@ func main() {
 }
 GOF
 
+# Starts two servers against the same Redis in one process, so the shell can
+# count banners. Takes "ack" to call AcknowledgeUnprotectedRedis first.
+mkdir -p "$WORK/warnprobe"
+cat > "$WORK/warnprobe/main.go" <<'GOF'
+package main
+
+import (
+	"context"
+	"os"
+	"time"
+
+	"github.com/benedict-erwin/gqm"
+)
+
+func main() {
+	if len(os.Args) > 2 && os.Args[2] == "ack" {
+		gqm.AcknowledgeUnprotectedRedis()
+	}
+	for i := 0; i < 2; i++ {
+		srv, err := gqm.NewServer(
+			gqm.WithServerRedisOpts(
+				gqm.WithRedisAddr(os.Args[1]),
+				gqm.WithPrefix("gqm:verify:warn:"),
+			),
+			gqm.WithLogLevel("error"),
+		)
+		if err != nil {
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		_ = srv.Start(ctx)
+		cancel()
+	}
+}
+GOF
+
 printf 'Building harness...\n'
 if ! go build -buildvcs=false -o "$WORK/harness/server" "$WORK/harness/main.go" 2>"$WORK/build.err"; then
   printf '\033[31mharness build failed\033[0m\n'; cat "$WORK/build.err"; exit 1
@@ -256,6 +292,9 @@ if ! go build -buildvcs=false -o "$WORK/redisctl/redisctl" "$WORK/redisctl/main.
 fi
 if ! go build -buildvcs=false -o "$WORK/jobidprobe/jobidprobe" "$WORK/jobidprobe/main.go" 2>>"$WORK/build.err"; then
   printf '\033[31mjobidprobe build failed\033[0m\n'; cat "$WORK/build.err"; exit 1
+fi
+if ! go build -buildvcs=false -o "$WORK/warnprobe/warnprobe" "$WORK/warnprobe/main.go" 2>>"$WORK/build.err"; then
+  printf '\033[31mwarnprobe build failed\033[0m\n'; cat "$WORK/build.err"; exit 1
 fi
 rctl() { "$WORK/redisctl/redisctl" "$REDIS_ADDR" "$@"; }
 
@@ -514,6 +553,28 @@ if start_server "$WORK/nopass.yaml"; then
 else
   bad "unprotected Redis still allowed to start" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
 fi
+
+# ===========================================================================
+head_ "I-06b  The Redis warning dedupes, and only an explicit acknowledgement silences it"
+# ===========================================================================
+# Both directions matter. A warning repeated 37 times per test run is one people
+# train themselves to ignore, but a warning that can be silenced by accident is
+# no warning at all. Each case runs as its own process, which is the only honest
+# way to test process-global state.
+
+warn_out=$("$WORK/warnprobe/warnprobe" "$REDIS_ADDR" 2>&1)
+n=$(grep -c 'REDIS HAS NO PASSWORD' <<<"$warn_out")
+[[ "$n" == "1" ]] && ok "two servers on one address warn exactly once (got $n)" \
+                  || bad "two servers on one address warn exactly once" "1" "$n"
+
+# Zero here would mean the dedup turned into a silencer.
+(( n > 0 )) && ok "an unacknowledged process is still warned" \
+            || bad "an unacknowledged process is still warned" "at least one banner" "none"
+
+warn_ack=$("$WORK/warnprobe/warnprobe" "$REDIS_ADDR" ack 2>&1)
+n=$(grep -c 'REDIS HAS NO PASSWORD' <<<"$warn_ack")
+[[ "$n" == "0" ]] && ok "AcknowledgeUnprotectedRedis silences the banner" \
+                  || bad "AcknowledgeUnprotectedRedis silences the banner" "0" "$n"
 
 # ===========================================================================
 head_ "I-05  Logout changes state, so it needs the CSRF header too"

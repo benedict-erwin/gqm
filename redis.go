@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -177,6 +179,51 @@ func queueRetention(ctx context.Context, pipe redis.Pipeliner, jobKey string, tt
 	}
 }
 
+// unprotectedRedisAcknowledged records that the operator has stated in code
+// that they understand an unprotected Redis. One-way: there is no un-acknowledge.
+var unprotectedRedisAcknowledged atomic.Bool
+
+// warnedRedisAddrs remembers which Redis addresses have already been warned
+// about in this process.
+var warnedRedisAddrs sync.Map // addr -> struct{}
+
+// AcknowledgeUnprotectedRedis silences the startup banner that GQM prints when
+// it connects to a Redis instance with no password. It applies to the whole
+// process and cannot be undone.
+//
+// Call it only if all of the following are acceptable to you:
+//
+//   - Anyone who can read the database can lift a dashboard session token from
+//     gqm:session:<token> and use it as a cookie. That bypasses authentication
+//     rather than attacking it, so no password is guessed and nothing is logged
+//     as a failed login.
+//   - Every job payload, result and error message is readable, including
+//     anything you put in them.
+//   - Anyone who can write to the database can inject jobs, which your own
+//     handlers will then execute with whatever privileges they hold.
+//
+// The usual reason to accept that is a Redis reachable only over a private
+// network or a loopback interface, on a host you already trust completely. If
+// that is not your situation, set a password (redis.password, or a Redis ACL
+// user) instead of calling this.
+//
+// This is deliberately a function call rather than a config field or an
+// environment variable. It belongs in your source, where it appears in a diff,
+// survives code review, and can be found with grep — the same reasoning behind
+// tls.Config.InsecureSkipVerify. A setting outside the code travels between
+// environments unnoticed, which is exactly how an acknowledgement made for
+// local development ends up silencing production.
+//
+// Typical use in a test or benchmark binary:
+//
+//	func TestMain(m *testing.M) {
+//		gqm.AcknowledgeUnprotectedRedis()
+//		os.Exit(m.Run())
+//	}
+func AcknowledgeUnprotectedRedis() {
+	unprotectedRedisAcknowledged.Store(true)
+}
+
 // warnIfUnprotected writes a deliberately loud banner when Redis is reachable
 // without a password.
 //
@@ -196,9 +243,23 @@ func queueRetention(ctx context.Context, pipe redis.Pipeliner, jobKey string, tt
 // exactly the situation where this most needs to be seen. It is not logged at
 // Error level either: this is not an error, and misclassifying it would pollute
 // error metrics and alerting.
+// The acknowledgement flag is deliberately NOT consulted here — the caller
+// checks it. That keeps this function testable on its own: a unit test can
+// exercise the banner without being affected by process-global state another
+// test may have set.
 func (rc *RedisClient) warnIfUnprotected(w io.Writer, authEnabled bool) {
 	opts := rc.rdb.Options()
 	if opts == nil || opts.Password != "" {
+		return
+	}
+
+	// Once per address, not once per Server.Start. The warning is a statement
+	// about a Redis instance, not about each time a server is switched on. A
+	// process running one server — the production shape — is unaffected; a test
+	// binary that starts dozens stops printing dozens of copies. Keyed by
+	// address rather than a plain sync.Once so a process connecting to two
+	// different unprotected instances still hears about the second.
+	if _, dup := warnedRedisAddrs.LoadOrStore(opts.Addr, struct{}{}); dup {
 		return
 	}
 
