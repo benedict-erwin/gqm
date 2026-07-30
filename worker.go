@@ -527,9 +527,11 @@ func (p *pool) completeJob(ctx context.Context, job *Job, elapsed time.Duration)
 	totalStatsKey := rc.Key("stats", job.Queue, "processed_total")
 	const statsTTL = 90 * 24 * 3600 // 90 days in seconds
 
+	retention := p.server.cfg.resultRetention(job.ResultTTL)
+
 	result := p.server.scripts.run(ctx, rc.rdb, "complete",
 		[]string{processingKey, completedKey, jobKey, dependentsKey, dailyStatsKey, totalStatsKey},
-		job.ID, now, "", strconv.FormatInt(durationMS, 10), statsTTL,
+		job.ID, now, "", strconv.FormatInt(durationMS, 10), statsTTL, retention,
 	)
 	if result.Err() != nil {
 		p.logger.Error("failed to complete job in Redis",
@@ -693,9 +695,11 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 	totalStatsKey := rc.Key("stats", job.Queue, "failed_total")
 	const statsTTL = 90 * 24 * 3600 // 90 days in seconds
 
+	retention := p.server.cfg.failureRetention(job.FailureTTL)
+
 	result := p.server.scripts.run(ctx, rc.rdb, "deadletter",
 		[]string{processingKey, dlqKey, jobKey, dependentsKey, dailyStatsKey, totalStatsKey},
-		job.ID, now, errMsg, statsTTL,
+		job.ID, now, errMsg, statsTTL, retention,
 	)
 	if result.Err() != nil {
 		p.logger.Error("failed to move job to DLQ",
@@ -752,6 +756,9 @@ func (p *pool) fallbackRemoveFromProcessing(job *Job, operation string, original
 		"error", fmt.Sprintf("%s failed: %v", operation, originalErr),
 		"failed_at", time.Now().Unix(),
 	)
+	// Terminal, and referenced by no sorted set, so without an expiry this hash
+	// would be unreachable garbage that only a manual SCAN could ever find.
+	queueRetention(ctx, pipe, jobKey, p.server.cfg.failureRetention(job.FailureTTL))
 	if _, err := pipe.Exec(ctx); err != nil {
 		p.logger.Error("CRITICAL: fallback cleanup also failed, job is a zombie",
 			"job_id", job.ID,

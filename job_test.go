@@ -425,3 +425,83 @@ func toStringMap(m map[string]any) map[string]string {
 	}
 	return out
 }
+
+func TestJobToMap_RetentionTTLOmittedWhenUnset(t *testing.T) {
+	j := NewJob("test", nil)
+	m, err := j.ToMap()
+	if err != nil {
+		t.Fatalf("ToMap: %v", err)
+	}
+	if _, ok := m["result_ttl"]; ok {
+		t.Error("result_ttl must be absent when unset, so the server default applies")
+	}
+	if _, ok := m["failure_ttl"]; ok {
+		t.Error("failure_ttl must be absent when unset, so the server default applies")
+	}
+}
+
+func TestJobToMap_RetentionTTLZeroIsPersisted(t *testing.T) {
+	// Zero must survive ToMap: it means "delete immediately", which is a real
+	// setting and must not be dropped by the skip-zero-value optimization.
+	j := NewJob("test", nil)
+	zero := 0
+	j.ResultTTL = &zero
+	j.FailureTTL = &zero
+
+	m, err := j.ToMap()
+	if err != nil {
+		t.Fatalf("ToMap: %v", err)
+	}
+	if v, ok := m["result_ttl"]; !ok || v != 0 {
+		t.Errorf("result_ttl = %v (present=%v), want 0 present", v, ok)
+	}
+	if v, ok := m["failure_ttl"]; !ok || v != 0 {
+		t.Errorf("failure_ttl = %v (present=%v), want 0 present", v, ok)
+	}
+}
+
+func TestJobFromMap_RetentionTTLRoundTrip(t *testing.T) {
+	tests := []struct {
+		name       string
+		resultTTL  *int
+		failureTTL *int
+	}{
+		{"unset stays nil", nil, nil},
+		{"positive values", intPtr(604800), intPtr(2592000)},
+		{"zero survives", intPtr(0), intPtr(0)},
+		{"permanent sentinel survives", intPtr(-1), intPtr(-1)},
+		{"mixed", intPtr(-1), intPtr(0)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := NewJob("test", nil)
+			orig.ResultTTL = tt.resultTTL
+			orig.FailureTTL = tt.failureTTL
+
+			m, err := orig.ToMap()
+			if err != nil {
+				t.Fatalf("ToMap: %v", err)
+			}
+			got, err := JobFromMap(toStringMap(m))
+			if err != nil {
+				t.Fatalf("JobFromMap: %v", err)
+			}
+
+			assertIntPtrEqual(t, "ResultTTL", got.ResultTTL, tt.resultTTL)
+			assertIntPtrEqual(t, "FailureTTL", got.FailureTTL, tt.failureTTL)
+		})
+	}
+}
+
+func assertIntPtrEqual(t *testing.T, field string, got, want *int) {
+	t.Helper()
+	switch {
+	case want == nil && got != nil:
+		t.Errorf("%s = %d, want nil", field, *got)
+	case want != nil && got == nil:
+		t.Errorf("%s = nil, want %d", field, *want)
+	case want != nil && got != nil && *got != *want:
+		t.Errorf("%s = %d, want %d", field, *got, *want)
+	}
+}

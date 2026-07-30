@@ -8,6 +8,45 @@ import (
 // EnqueueOption configures job enqueue behavior.
 type EnqueueOption func(*Job)
 
+// TTLPermanent retains a terminal job's hash forever, opting it out of
+// retention. Pass it to ResultTTL or FailureTTL.
+//
+// Retaining jobs permanently means their memory is never reclaimed, and it also
+// keeps them un-evictable under Redis's volatile-* maxmemory policies, since
+// those only consider keys that carry an expiry.
+const TTLPermanent = time.Duration(-1)
+
+// ResultTTL overrides how long this job's hash is retained after it completes
+// successfully, replacing the server default for this job only.
+//
+// A negative duration means TTLPermanent (retain forever). A zero duration
+// deletes the job hash as soon as it completes. Sub-second values are rounded
+// up to 1s, so the smallest retention that still keeps the job readable is 1s.
+func ResultTTL(d time.Duration) EnqueueOption {
+	return func(j *Job) { j.ResultTTL = ttlSeconds(d) }
+}
+
+// FailureTTL overrides how long this job's hash is retained after it reaches a
+// failure terminal state (dead-lettered, canceled, or stopped), replacing the
+// server default for this job only.
+//
+// Follows the same convention as ResultTTL: negative means retain forever, zero
+// deletes immediately.
+func FailureTTL(d time.Duration) EnqueueOption {
+	return func(j *Job) { j.FailureTTL = ttlSeconds(d) }
+}
+
+// ttlSeconds converts a retention duration to the seconds representation stored
+// in the job hash, collapsing any negative duration to the permanent sentinel.
+func ttlSeconds(d time.Duration) *int {
+	if d < 0 {
+		secs := -1
+		return &secs
+	}
+	secs := int(math.Ceil(d.Seconds()))
+	return &secs
+}
+
 // Queue sets the target queue for the job.
 func Queue(name string) EnqueueOption {
 	return func(j *Job) { j.Queue = name }

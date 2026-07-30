@@ -259,10 +259,17 @@ func (se *schedulerEngine) cancelPreviousCronJob(ctx context.Context, entryID, j
 	rc := se.server.rc
 	jobKey := rc.Key("job", jobID)
 
-	// Read the job's queue to know which ready list to remove from.
-	queue, _ := rc.rdb.HGet(ctx, jobKey, "queue").Result()
+	// Read the job's queue to know which ready list to remove from, plus its
+	// retention override so a stopped job does not linger forever.
+	vals, _ := rc.rdb.HMGet(ctx, jobKey, "queue", "failure_ttl").Result()
+	queue, _ := vals[0].(string)
 	if queue == "" {
 		queue = "default"
+	}
+	var failureTTLOverride *int
+	if v, _ := vals[1].(string); v != "" {
+		ttl := parseInt(v)
+		failureTTLOverride = &ttl
 	}
 
 	pipe := rc.rdb.Pipeline()
@@ -273,6 +280,8 @@ func (se *schedulerEngine) cancelPreviousCronJob(ctx context.Context, entryID, j
 	pipe.ZRem(ctx, rc.Key("scheduled"), jobID)
 	// Remove from processing set (best-effort; worker may still be running).
 	pipe.ZRem(ctx, rc.Key("queue", queue, "processing"), jobID)
+	// Stopped is terminal and, like canceled, sits in no sorted set.
+	queueRetention(ctx, pipe, jobKey, se.server.cfg.failureRetention(failureTTLOverride))
 	if _, err := pipe.Exec(ctx); err != nil {
 		if ctx.Err() == nil {
 			se.logger.Error("cancelling previous cron job",

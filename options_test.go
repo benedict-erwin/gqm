@@ -1,6 +1,96 @@
 package gqm
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func TestResultTTL_Semantics(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Duration
+		want int
+	}{
+		{"whole seconds", 7 * 24 * time.Hour, 604800},
+		{"zero deletes immediately", 0, 0},
+		{"permanent sentinel", TTLPermanent, -1},
+		{"any negative collapses to permanent", -5 * time.Hour, -1},
+		{"sub-second rounds up", 500 * time.Millisecond, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := NewJob("test", nil)
+			ResultTTL(tt.in)(j)
+			if j.ResultTTL == nil {
+				t.Fatal("ResultTTL should be set, got nil")
+			}
+			if *j.ResultTTL != tt.want {
+				t.Errorf("ResultTTL = %d, want %d", *j.ResultTTL, tt.want)
+			}
+		})
+	}
+}
+
+func TestFailureTTL_Semantics(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Duration
+		want int
+	}{
+		{"whole seconds", 30 * 24 * time.Hour, 2592000},
+		{"zero deletes immediately", 0, 0},
+		{"permanent sentinel", TTLPermanent, -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := NewJob("test", nil)
+			FailureTTL(tt.in)(j)
+			if j.FailureTTL == nil {
+				t.Fatal("FailureTTL should be set, got nil")
+			}
+			if *j.FailureTTL != tt.want {
+				t.Errorf("FailureTTL = %d, want %d", *j.FailureTTL, tt.want)
+			}
+		})
+	}
+}
+
+func TestRetentionTTL_Unset(t *testing.T) {
+	j := NewJob("test", nil)
+	if j.ResultTTL != nil {
+		t.Errorf("ResultTTL should default to nil (server default), got %d", *j.ResultTTL)
+	}
+	if j.FailureTTL != nil {
+		t.Errorf("FailureTTL should default to nil (server default), got %d", *j.FailureTTL)
+	}
+}
+
+func TestRetentionTTL_OverrideWinsOverDefault(t *testing.T) {
+	tests := []struct {
+		name          string
+		override      *int
+		serverDefault int
+		want          int
+	}{
+		{"nil falls back to server default", nil, 604800, 604800},
+		{"override wins", intPtr(3600), 604800, 3600},
+		{"override of zero wins over non-zero default", intPtr(0), 604800, 0},
+		{"override of permanent wins", intPtr(-1), 604800, -1},
+		{"nil falls back to a permanent default", nil, -1, -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := retentionTTL(tt.override, tt.serverDefault); got != tt.want {
+				t.Errorf("retentionTTL = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func intPtr(v int) *int { return &v }
 
 func TestAllowFailure_True(t *testing.T) {
 	j := NewJob("test", nil)

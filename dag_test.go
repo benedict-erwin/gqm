@@ -572,3 +572,94 @@ func TestDequeue_StatusGuard_MissingHashSkipped(t *testing.T) {
 		t.Errorf("processing set should be empty, got %d entries", count)
 	}
 }
+
+func TestPropagateFailure_CleansUpDAGMetadata_AllowFailure(t *testing.T) {
+	// Guards a permanent leak: a job that dead-letters while it has dependents
+	// used to leave the parent's dependents set and the promoted dependent's deps
+	// set behind forever. Retention TTLs do not cover either — both are sets of
+	// their own, not the job hash.
+	rc := testRedisClient(t)
+	scripts := testScripts(t)
+	ctx := context.Background()
+
+	rc.rdb.HSet(ctx, rc.Key("job", "lp-child"), "status", "deferred", "queue", "default", "allow_failure", "1")
+	rc.rdb.SAdd(ctx, rc.Key("job", "lp-child", "pending_deps"), "lp-parent")
+	rc.rdb.SAdd(ctx, rc.Key("job", "lp-child", "deps"), "lp-parent")
+	rc.rdb.SAdd(ctx, rc.Key("job", "lp-parent", "dependents"), "lp-child")
+	rc.rdb.SAdd(ctx, rc.Key("deferred"), "lp-child")
+
+	t.Cleanup(func() {
+		rc.rdb.Del(ctx,
+			rc.Key("job", "lp-child"),
+			rc.Key("job", "lp-child", "pending_deps"),
+			rc.Key("job", "lp-child", "deps"),
+			rc.Key("job", "lp-parent", "dependents"),
+			rc.Key("deferred"),
+			rc.Key("queue", "default", "ready"),
+		)
+	})
+
+	if err := propagateFailure(ctx, rc, scripts, "lp-parent"); err != nil {
+		t.Fatalf("propagateFailure: %v", err)
+	}
+
+	// Precondition for the cleanup assertions: the dependent really was promoted.
+	if status, _ := rc.rdb.HGet(ctx, rc.Key("job", "lp-child"), "status").Result(); status != "ready" {
+		t.Fatalf("child status = %q, want ready", status)
+	}
+
+	for _, key := range []string{
+		rc.Key("job", "lp-parent", "dependents"),
+		rc.Key("job", "lp-child", "deps"),
+		rc.Key("job", "lp-child", "pending_deps"),
+	} {
+		n, err := rc.rdb.Exists(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("EXISTS %s: %v", key, err)
+		}
+		if n != 0 {
+			t.Errorf("%s survived propagateFailure; it leaks permanently", key)
+		}
+	}
+}
+
+func TestPropagateFailure_CleansUpDAGMetadata_CascadeCancel(t *testing.T) {
+	rc := testRedisClient(t)
+	scripts := testScripts(t)
+	ctx := context.Background()
+
+	rc.rdb.HSet(ctx, rc.Key("job", "cc-child"), "status", "deferred", "queue", "default")
+	rc.rdb.SAdd(ctx, rc.Key("job", "cc-child", "pending_deps"), "cc-parent")
+	rc.rdb.SAdd(ctx, rc.Key("job", "cc-child", "deps"), "cc-parent")
+	rc.rdb.SAdd(ctx, rc.Key("job", "cc-parent", "dependents"), "cc-child")
+	rc.rdb.SAdd(ctx, rc.Key("deferred"), "cc-child")
+
+	t.Cleanup(func() {
+		rc.rdb.Del(ctx,
+			rc.Key("job", "cc-child"),
+			rc.Key("job", "cc-child", "pending_deps"),
+			rc.Key("job", "cc-child", "deps"),
+			rc.Key("job", "cc-child", "dependents"),
+			rc.Key("job", "cc-parent", "dependents"),
+			rc.Key("deferred"),
+		)
+	})
+
+	if err := propagateFailure(ctx, rc, scripts, "cc-parent"); err != nil {
+		t.Fatalf("propagateFailure: %v", err)
+	}
+
+	if status, _ := rc.rdb.HGet(ctx, rc.Key("job", "cc-child"), "status").Result(); status != StatusCanceled {
+		t.Fatalf("child status = %q, want %q", status, StatusCanceled)
+	}
+
+	// The cascade path already cleaned the dependent's own metadata; what was
+	// missing is the failed parent's dependents set.
+	n, err := rc.rdb.Exists(ctx, rc.Key("job", "cc-parent", "dependents")).Result()
+	if err != nil {
+		t.Fatalf("EXISTS: %v", err)
+	}
+	if n != 0 {
+		t.Error("failed parent's dependents set survived; it leaks permanently")
+	}
+}

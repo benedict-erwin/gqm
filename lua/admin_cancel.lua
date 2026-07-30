@@ -9,6 +9,8 @@
 -- ARGV[1]: job ID
 -- ARGV[2]: current timestamp
 -- ARGV[3]: current status (from Go caller)
+-- ARGV[4]: failure retention TTL (seconds): >0 sets an expiry on the job hash,
+--          0 deletes the record outright, <0 retains it permanently
 --
 -- Returns: 1 on success, 0 if job was not found in expected location
 
@@ -32,4 +34,14 @@ end
 redis.call('HSET', KEYS[1],
     'status', 'canceled',
     'completed_at', ARGV[2])
+
+-- Canceled is terminal. Unlike completed and dead-lettered jobs it is added to
+-- no sorted set, so an unexpired hash here is garbage nothing references.
+local retention = tonumber(ARGV[4])
+if retention == 0 then
+    redis.call('DEL', KEYS[1])
+elseif retention > 0 then
+    redis.call('EXPIRE', KEYS[1], retention)
+end
+
 return 1

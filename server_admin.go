@@ -97,10 +97,17 @@ func (s *Server) CancelJob(ctx context.Context, jobID string) error {
 	scheduledKey := s.rc.Key("scheduled")
 	deferredKey := s.rc.Key("deferred")
 
+	// The job hash is already in hand, so a per-job override costs no extra read.
+	var failureTTLOverride *int
+	if v := data["failure_ttl"]; v != "" {
+		ttl := parseInt(v)
+		failureTTLOverride = &ttl
+	}
+
 	now := time.Now().Unix()
 	result := s.scripts.run(ctx, s.rc.rdb, "admin_cancel",
 		[]string{jobKey, readyKey, scheduledKey, deferredKey},
-		jobID, now, status,
+		jobID, now, status, s.cfg.failureRetention(failureTTLOverride),
 	)
 	if result.Err() != nil {
 		return fmt.Errorf("canceling job %s: %w", jobID, result.Err())
@@ -200,7 +207,12 @@ func (s *Server) EmptyQueue(ctx context.Context, queue string) (int64, error) {
 
 	pipe := s.rc.rdb.Pipeline()
 	for _, id := range jobIDs {
-		pipe.HSet(ctx, s.rc.Key("job", id), "status", StatusCanceled, "completed_at", time.Now().Unix())
+		jobKey := s.rc.Key("job", id)
+		pipe.HSet(ctx, jobKey, "status", StatusCanceled, "completed_at", time.Now().Unix())
+		// Server default only: honoring per-job overrides here would mean up to
+		// maxBulkOps extra reads for a bulk operation whose whole point is to be
+		// cheap.
+		queueRetention(ctx, pipe, jobKey, s.cfg.failureRetention(nil))
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, fmt.Errorf("emptying queue %s: %w", queue, err)

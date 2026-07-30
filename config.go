@@ -38,6 +38,17 @@ type AppConfig struct {
 	ShutdownTimeout int    `yaml:"shutdown_timeout"`   // seconds
 	GlobalJobTimeout int   `yaml:"global_job_timeout"` // seconds
 	GracePeriod     int    `yaml:"grace_period"`       // seconds
+
+	// ResultTTL and FailureTTL are the server-wide retention defaults in
+	// seconds: how long a terminal job's hash is kept before Redis expires it.
+	// ResultTTL covers completed jobs, FailureTTL covers dead-lettered,
+	// canceled, and stopped ones.
+	//
+	// Omitting them applies the built-in defaults (7 days and 30 days). -1
+	// retains jobs permanently, 0 deletes them immediately. Pointers, because 0
+	// is a meaningful setting and must be distinguishable from "not specified".
+	ResultTTL  *int `yaml:"result_ttl"`  // seconds, default 604800 (7 days)
+	FailureTTL *int `yaml:"failure_ttl"` // seconds, default 2592000 (30 days)
 }
 
 // QueueDef declares a named queue with optional priority metadata.
@@ -185,6 +196,14 @@ func (c *Config) validate() error {
 	}
 	if c.App.GracePeriod < 0 {
 		return fmt.Errorf("app.grace_period must be >= 0")
+	}
+	// -1 is the "retain permanently" sentinel; anything below it is a typo, not
+	// a policy, so reject it rather than silently treating it as permanent.
+	if c.App.ResultTTL != nil && *c.App.ResultTTL < -1 {
+		return fmt.Errorf("app.result_ttl must be >= -1 (-1 = permanent, 0 = delete immediately)")
+	}
+	if c.App.FailureTTL != nil && *c.App.FailureTTL < -1 {
+		return fmt.Errorf("app.failure_ttl must be >= -1 (-1 = permanent, 0 = delete immediately)")
 	}
 
 	// Queues
@@ -521,6 +540,14 @@ func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 	}
 	if cfg.App.LogLevel != "" {
 		serverOpts = append(serverOpts, WithLogLevel(cfg.App.LogLevel))
+	}
+	// Retention: any non-nil value is forwarded, including 0 and -1. Guarding on
+	// "> 0" like the timeouts above would silently drop both sentinels.
+	if cfg.App.ResultTTL != nil {
+		serverOpts = append(serverOpts, WithResultTTL(time.Duration(*cfg.App.ResultTTL)*time.Second))
+	}
+	if cfg.App.FailureTTL != nil {
+		serverOpts = append(serverOpts, WithFailureTTL(time.Duration(*cfg.App.FailureTTL)*time.Second))
 	}
 
 	// Scheduler

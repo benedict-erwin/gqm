@@ -24,5 +24,13 @@ redis.call('HSET', KEYS[3],
     'started_at', '',
     'worker_id', '',
     'execution_duration', '0')
+
+-- The job was dead-lettered, so its hash carries the failure retention expiry.
+-- HSET does not clear a TTL, so without PERSIST the job would stay on death row
+-- while sitting in the ready queue or being processed, and could vanish
+-- mid-flight. Retrying makes it non-terminal again, and non-terminal jobs must
+-- never expire.
+redis.call('PERSIST', KEYS[3])
+
 redis.call('LPUSH', KEYS[2], ARGV[1])
 return 1

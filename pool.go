@@ -12,6 +12,12 @@ const (
 	defaultHeartbeatInterval = 5 * time.Second
 	defaultRetryDelay        = 10 * time.Second
 	maxBackoffDelay          = 24 * time.Hour
+
+	// Retention defaults, in seconds. Failures are kept longer than successes
+	// because a dead-lettered job is evidence of a problem someone still has to
+	// look at, while a completed job's record is mostly of passing interest.
+	defaultResultTTLSeconds  = 7 * 24 * 3600  // 7 days
+	defaultFailureTTLSeconds = 30 * 24 * 3600 // 30 days
 )
 
 // DequeueStrategy determines how a pool selects jobs from multiple queues.

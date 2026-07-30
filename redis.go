@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -156,4 +157,20 @@ func WithRedisTLS(tc *tls.Config) RedisOption {
 //	client, _ := gqm.NewClient(gqm.WithRedisClient(rdb))
 func WithRedisClient(rdb *redis.Client) RedisOption {
 	return func(cfg *RedisConfig) { cfg.existingClient = rdb }
+}
+
+// queueRetention adds a retention expiry for a job that has just reached a
+// terminal state to the given pipeline.
+//
+// ttl follows the convention used throughout retention handling: a positive
+// value sets an expiry in seconds, 0 deletes the record immediately, and a
+// negative value retains it permanently. Callers must only use this on terminal
+// jobs — an expiry on a job that is still queued or running would be lost work.
+func queueRetention(ctx context.Context, pipe redis.Pipeliner, jobKey string, ttl int) {
+	switch {
+	case ttl == 0:
+		pipe.Del(ctx, jobKey)
+	case ttl > 0:
+		pipe.Expire(ctx, jobKey, time.Duration(ttl)*time.Second)
+	}
 }

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Job retention** — terminal jobs now expire instead of accumulating forever. `result_ttl` (default 7 days) covers completed jobs; `failure_ttl` (default 30 days) covers dead-lettered, canceled, and stopped ones. Configurable via `app.result_ttl`/`app.failure_ttl`, `WithResultTTL()`/`WithFailureTTL()`, or per job with `ResultTTL()`/`FailureTTL()`. `TTLPermanent` retains forever, `0` deletes on completion
+- **Terminal sorted set trimming** — `:completed` and `:dead_letter` are trimmed by score inside the existing terminal Lua scripts, so a set entry never outlives the job hash it points to
+
+### Fixed
+- **Unbounded Redis growth** — every terminal job previously left a permanent `gqm:job:<id>` hash plus a sorted set entry, with no reclaim path. Measured cost is ~1.5 KB per retained job
+- **Orphaned terminal jobs** — `canceled`, `stopped`, and fallback-`failed` jobs belong to no sorted set, so without an expiry they were unreachable garbage that only a manual `SCAN` could find
+- **DAG metadata leak on dead-letter** — `propagateFailure` never deleted the failed parent's `:dependents` set, and its `allow_failure` branch never deleted the promoted dependent's `:deps` set
+
+### Notes
+- Retention only ever applies to terminal jobs. Non-terminal jobs carry no expiry, which also keeps them outside the candidate set of Redis `volatile-*` eviction policies
+- `admin_retry` issues `PERSIST` on the job hash: `HSET` does not clear a TTL, so a retried dead-letter job would otherwise inherit its expiry and could vanish while queued or running
+
 ## [0.1.2] — 2026-02-24
 
 ### Fixed

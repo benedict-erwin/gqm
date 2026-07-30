@@ -59,6 +59,28 @@ type serverConfig struct {
 	authUsers      []AuthUser // loaded from config
 	apiKeys        []AuthAPIKey
 	apiRateLimit   int // requests/second per IP; 0 = default (100), -1 = disabled
+
+	// Retention windows in seconds, applied to terminal jobs that carry no
+	// per-job override. -1 retains permanently; 0 deletes immediately.
+	//
+	// Pointers so that the zero value of serverConfig means "use the built-in
+	// default" rather than 0, which would mean "delete every terminal job
+	// immediately" — the most destructive possible reading of an unset field.
+	resultTTL  *int
+	failureTTL *int
+}
+
+// resultRetention resolves the retention window for a job that completed
+// successfully: per-job override first, then the server setting, then the
+// built-in default.
+func (c *serverConfig) resultRetention(override *int) int {
+	return retentionTTL(override, retentionTTL(c.resultTTL, defaultResultTTLSeconds))
+}
+
+// failureRetention resolves the retention window for a job that reached a
+// failure terminal state, with the same precedence as resultRetention.
+func (c *serverConfig) failureRetention(override *int) int {
+	return retentionTTL(override, retentionTTL(c.failureTTL, defaultFailureTTLSeconds))
 }
 
 // WithServerRedis sets the Redis address for the server.
@@ -102,6 +124,29 @@ func WithGracePeriod(d time.Duration) ServerOption {
 		if d > 0 {
 			cfg.gracePeriod = d
 		}
+	}
+}
+
+// WithResultTTL sets how long completed jobs are retained server-wide.
+// Individual jobs can override it with the ResultTTL enqueue option.
+//
+// A negative duration means TTLPermanent (retain forever). A zero duration
+// deletes each job hash as soon as it completes. Note that retaining jobs
+// permanently leaves no way to reclaim their memory.
+func WithResultTTL(d time.Duration) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.resultTTL = ttlSeconds(d)
+	}
+}
+
+// WithFailureTTL sets how long jobs that reached a failure terminal state
+// (dead-lettered, canceled, or stopped) are retained server-wide. Individual
+// jobs can override it with the FailureTTL enqueue option.
+//
+// Follows the same convention as WithResultTTL.
+func WithFailureTTL(d time.Duration) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.failureTTL = ttlSeconds(d)
 	}
 }
 

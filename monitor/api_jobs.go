@@ -112,6 +112,8 @@ var jobAllowedFields = map[string]bool{
 	"depends_on":         true,
 	"allow_failure":      true,
 	"enqueue_at_front":   true,
+	"result_ttl":         true,
+	"failure_ttl":        true,
 }
 
 // mapToJobResponse converts a Redis hash to a job response map.

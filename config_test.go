@@ -1486,3 +1486,104 @@ func TestNewServerFromConfig_WithMonitoring(t *testing.T) {
 		t.Error("monitor should be initialized when API is enabled")
 	}
 }
+
+func TestConfigValidate_RetentionTTL(t *testing.T) {
+	tests := []struct {
+		name       string
+		resultTTL  *int
+		failureTTL *int
+		wantErr    bool
+	}{
+		{"both unset", nil, nil, false},
+		{"positive values", intPtr(604800), intPtr(2592000), false},
+		{"zero deletes immediately", intPtr(0), intPtr(0), false},
+		{"permanent sentinel", intPtr(-1), intPtr(-1), false},
+		{"result_ttl below sentinel rejected", intPtr(-2), nil, true},
+		{"failure_ttl below sentinel rejected", nil, intPtr(-100), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				App: AppConfig{
+					ResultTTL:  tt.resultTTL,
+					FailureTTL: tt.failureTTL,
+				},
+			}
+			err := cfg.validate()
+			if tt.wantErr && err == nil {
+				t.Error("expected validation error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestServerConfig_RetentionDefaults(t *testing.T) {
+	// A zero-valued serverConfig must resolve to the built-in windows. If an
+	// unset field ever resolved to 0 instead, every terminal job would be
+	// deleted on the spot.
+	var cfg serverConfig
+	if got := cfg.resultRetention(nil); got != 604800 {
+		t.Errorf("default result retention = %d, want 604800 (7 days)", got)
+	}
+	if got := cfg.failureRetention(nil); got != 2592000 {
+		t.Errorf("default failure retention = %d, want 2592000 (30 days)", got)
+	}
+}
+
+func TestServerConfig_RetentionPrecedence(t *testing.T) {
+	tests := []struct {
+		name        string
+		serverValue *int
+		jobOverride *int
+		want        int
+	}{
+		{"unset everywhere falls back to built-in", nil, nil, 604800},
+		{"server setting wins over built-in", intPtr(3600), nil, 3600},
+		{"job override wins over server setting", intPtr(3600), intPtr(60), 60},
+		{"job override of zero wins", intPtr(3600), intPtr(0), 0},
+		{"server setting of zero wins over built-in", intPtr(0), nil, 0},
+		{"permanent at server level", intPtr(-1), nil, -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &serverConfig{resultTTL: tt.serverValue}
+			if got := cfg.resultRetention(tt.jobOverride); got != tt.want {
+				t.Errorf("resultRetention = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWithResultTTL_And_WithFailureTTL(t *testing.T) {
+	tests := []struct {
+		name           string
+		result         time.Duration
+		failure        time.Duration
+		wantResultTTL  int
+		wantFailureTTL int
+	}{
+		{"explicit durations", 48 * time.Hour, 14 * 24 * time.Hour, 172800, 1209600},
+		{"zero is honored, not treated as unset", 0, 0, 0, 0},
+		{"permanent is honored", TTLPermanent, TTLPermanent, -1, -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &serverConfig{}
+			WithResultTTL(tt.result)(cfg)
+			WithFailureTTL(tt.failure)(cfg)
+
+			if got := cfg.resultRetention(nil); got != tt.wantResultTTL {
+				t.Errorf("result retention = %d, want %d", got, tt.wantResultTTL)
+			}
+			if got := cfg.failureRetention(nil); got != tt.wantFailureTTL {
+				t.Errorf("failure retention = %d, want %d", got, tt.wantFailureTTL)
+			}
+		})
+	}
+}

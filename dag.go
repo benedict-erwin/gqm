@@ -182,12 +182,32 @@ func propagateFailure(ctx context.Context, rc *RedisClient, scripts *scriptRegis
 			if result.Err() != nil {
 				return fmt.Errorf("resolving dependency for job %s after parent failure: %w", depID, result.Err())
 			}
+
+			// Clean up DAG metadata once the dependent is promoted, mirroring
+			// resolveDependents. dag_resolve deletes pending_deps itself when it
+			// promotes, but deps is only ever removed here.
+			if val, err := result.Int64(); err == nil && val == 1 {
+				depsKey := rc.Key("job", depID, "deps")
+				if err := rc.rdb.Del(ctx, depsKey, pendingDepsKey).Err(); err != nil && ctx.Err() == nil {
+					slog.Warn("failed to clean up DAG metadata for allow_failure dependent",
+						"job_id", depID, "error", err)
+				}
+			}
 		} else {
 			// Cancel dependent and cascade.
 			if err := cancelDependents(ctx, rc, scripts, depID); err != nil {
 				return err
 			}
 		}
+	}
+
+	// Clean up the parent's dependents set, as resolveDependents does on the
+	// success path. Without this a job that dead-letters while it has dependents
+	// leaves the set behind permanently — retention TTLs do not cover it, since
+	// this is a set of its own and not the job hash.
+	if err := rc.rdb.Del(ctx, dependentsKey).Err(); err != nil && ctx.Err() == nil {
+		slog.Warn("failed to clean up dependents set of failed parent",
+			"parent_job_id", parentJobID, "error", err)
 	}
 
 	return nil

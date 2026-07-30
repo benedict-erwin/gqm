@@ -54,6 +54,16 @@ type Job struct {
 	AllowFailure      bool            `json:"allow_failure,omitempty"`
 	EnqueueAtFront    bool            `json:"enqueue_at_front,omitempty"`
 
+	// ResultTTL and FailureTTL control how long the job hash is retained after
+	// the job reaches a terminal state, in seconds. ResultTTL applies to
+	// completed jobs, FailureTTL to dead-lettered, canceled, and stopped ones.
+	//
+	// nil means "use the server default". A non-nil value overrides it:
+	// TTLPermanent (-1) retains the job forever, 0 deletes it immediately.
+	// nil and 0 are distinct, which is why these are pointers.
+	ResultTTL  *int `json:"result_ttl,omitempty"`
+	FailureTTL *int `json:"failure_ttl,omitempty"`
+
 	// unique is a transient enqueue-time flag (not persisted to Redis).
 	// When true, Enqueue checks for existing job with same ID before creating.
 	unique bool
@@ -185,6 +195,15 @@ func (j *Job) ToMap() (map[string]any, error) {
 	if j.EnqueueAtFront {
 		m["enqueue_at_front"] = "1"
 	}
+	// Retention overrides are pointers: 0 is a meaningful value ("delete
+	// immediately"), so absence must be encoded as a missing field rather than
+	// as a zero, unlike the non-zero-only fields above.
+	if j.ResultTTL != nil {
+		m["result_ttl"] = *j.ResultTTL
+	}
+	if j.FailureTTL != nil {
+		m["failure_ttl"] = *j.FailureTTL
+	}
 
 	return m, nil
 }
@@ -243,5 +262,26 @@ func JobFromMap(m map[string]string) (*Job, error) {
 	j.AllowFailure = m["allow_failure"] == "1"
 	j.EnqueueAtFront = m["enqueue_at_front"] == "1"
 
+	if v, ok := m["result_ttl"]; ok && v != "" {
+		ttl := parseInt(v)
+		j.ResultTTL = &ttl
+	}
+	if v, ok := m["failure_ttl"]; ok && v != "" {
+		ttl := parseInt(v)
+		j.FailureTTL = &ttl
+	}
+
 	return j, nil
+}
+
+// retentionTTL resolves the retention TTL, in seconds, for a job entering a
+// terminal state. A per-job override wins over the server-wide default.
+//
+// The result keeps the same convention as its inputs: -1 retains the job hash
+// permanently (no EXPIRE is issued), 0 deletes it immediately.
+func retentionTTL(override *int, serverDefault int) int {
+	if override != nil {
+		return *override
+	}
+	return serverDefault
 }
