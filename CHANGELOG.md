@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Security
+- **Dashboard `custom_dir` no longer serves arbitrary files** — the dashboard route is unauthenticated by design, which was safe for the embedded assets but not for an operator-supplied directory. Serving is now restricted to an allowlist of asset extensions with dot-prefixed paths rejected, so a directory that also holds `gqm.yaml`, dotenv files, or backups can no longer leak them. Applies to the embedded assets too
+- **Dashboard `custom_dir` no longer follows symlinks out of tree** — switched from `os.DirFS`, which is explicitly not a jail, to `os.Root`. A symlink inside the directory was previously an unauthenticated read of anything on the host
+- **Unauthenticated API on a routable address is now refused at startup** — with auth disabled every caller is treated as admin, including on the destructive endpoints. That is still allowed on loopback, but binding to a reachable address without auth or API keys now fails config validation instead of emitting a warning that is easy to miss in a log stream
+- **CSRF header is required even when auth is disabled** — previously the check was skipped in that mode, which is exactly where nothing else guards the request. A malicious page could otherwise drive a local unauthenticated instance through a victim's browser. API keys remain exempt, since browsers do not attach them automatically
+
 ### Added
 - **Job retention** — terminal jobs now expire instead of accumulating forever. `result_ttl` (default 7 days) covers completed jobs; `failure_ttl` (default 30 days) covers dead-lettered, canceled, and stopped ones. Configurable via `app.result_ttl`/`app.failure_ttl`, `WithResultTTL()`/`WithFailureTTL()`, or per job with `ResultTTL()`/`FailureTTL()`. `TTLPermanent` retains forever, `0` deletes on completion
 - **Terminal sorted set trimming** — `:completed` and `:dead_letter` are trimmed by score inside the existing terminal Lua scripts, so a set entry never outlives the job hash it points to

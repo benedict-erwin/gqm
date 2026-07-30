@@ -96,9 +96,15 @@ func (m *Monitor) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 		// (which we don't enable), so this prevents CSRF even if SameSite
 		// is somehow bypassed. A static value is sufficient because the
 		// protection comes from the header's presence, not its value.
-		// API key auth (X-GQM-User starts with "apikey:") is exempt.
+		//
+		// Only API key auth is exempt, because API keys are not sent
+		// automatically by browsers. An empty X-GQM-User means auth is disabled,
+		// which must still require the header: a browser reaching an
+		// unauthenticated instance is exactly the case CSRF protects against,
+		// and treating "no user" as "not a browser" would skip the check
+		// precisely where nothing else guards the request.
 		user := r.Header.Get("X-GQM-User")
-		isCookieAuth := user != "" && !strings.HasPrefix(user, "apikey:")
+		isCookieAuth := !strings.HasPrefix(user, "apikey:")
 		if isCookieAuth && r.Header.Get("X-GQM-CSRF") != "1" {
 			writeError(w, http.StatusForbidden, "missing CSRF header", "CSRF_REQUIRED")
 			return

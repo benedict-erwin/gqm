@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -358,6 +359,19 @@ func (m *MonitoringConfig) validate() error {
 		m.Dashboard.PathPrefix = "/dashboard"
 	}
 
+	// With auth disabled every request is treated as admin, and that includes the
+	// destructive endpoints (empty queue, clear DLQ, delete job, trigger cron).
+	// That is defensible while the listener is loopback-only — the usual local
+	// development case — but exposing it on a routable address hands full control
+	// of the queue to anyone who can reach the port. Refuse rather than warn:
+	// the existing startup warning is easy to miss in a log stream.
+	if !m.Auth.Enabled && len(m.API.APIKeys) == 0 && !isLoopbackAddr(m.API.Addr) {
+		return fmt.Errorf("monitoring: auth is disabled and api.addr %q is not loopback, "+
+			"which would expose the destructive admin API to anyone who can reach it; "+
+			"either set monitoring.auth.enabled: true, add monitoring.api.api_keys, "+
+			"or bind to a loopback address such as \"127.0.0.1:8080\"", m.API.Addr)
+	}
+
 	// Auth validation
 	if m.Auth.Enabled {
 		if len(m.Auth.Users) == 0 {
@@ -500,6 +514,29 @@ func (ce *CronEntryYAML) toCronEntry() CronEntry {
 
 // NewServerFromConfig creates a Server from a Config, with optional code overrides.
 // The config serves as the base configuration; ServerOption values always win.
+// isLoopbackAddr reports whether a listen address binds only to loopback.
+//
+// Anything it cannot prove to be loopback is treated as routable, so a listen
+// address this function does not understand fails safe rather than silently
+// permitting an exposed unauthenticated API. A bare port (":8080") and an empty
+// host ("" from ":8080" split) both mean "all interfaces" to net.Listen.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Not host:port — could be a bare port or something unparseable.
+		// Neither can be shown to be loopback.
+		return false
+	}
+	if host == "" {
+		return false // ":8080" listens on every interface
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
 func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 	// Build Redis options from config
 	var redisOpts []RedisOption

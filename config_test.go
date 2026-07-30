@@ -1291,6 +1291,8 @@ monitoring:
 func TestValidate_MonitoringDashboardImpliesAPI(t *testing.T) {
 	yaml := `
 monitoring:
+  api:
+    addr: "127.0.0.1:8080"
   dashboard:
     enabled: true
 `
@@ -1308,6 +1310,7 @@ func TestValidate_MonitoringSessionTTLDefault(t *testing.T) {
 monitoring:
   api:
     enabled: true
+    addr: "127.0.0.1:8080"
 `
 	cfg, err := LoadConfig([]byte(yaml))
 	if err != nil {
@@ -1319,10 +1322,15 @@ monitoring:
 }
 
 func TestValidate_MonitoringAddrDefault(t *testing.T) {
+	// An api_key satisfies the "not unauthenticated on a routable address"
+	// gate without setting addr, which is the value under test here.
 	yaml := `
 monitoring:
   api:
     enabled: true
+    api_keys:
+      - name: "test"
+        key: "gqm_ak_test_key_at_least_32_characters_long"
 `
 	cfg, err := LoadConfig([]byte(yaml))
 	if err != nil {
@@ -1338,6 +1346,7 @@ func TestValidate_MonitoringDashboardPathPrefixDefault(t *testing.T) {
 monitoring:
   api:
     enabled: true
+    addr: "127.0.0.1:8080"
   dashboard:
     enabled: true
 `
@@ -1357,6 +1366,7 @@ monitoring:
     session_ttl: -1
   api:
     enabled: true
+    addr: "127.0.0.1:8080"
 `
 	_, err := LoadConfig([]byte(yaml))
 	if err == nil || !strings.Contains(err.Error(), "session_ttl") {
@@ -1585,5 +1595,111 @@ func TestWithResultTTL_And_WithFailureTTL(t *testing.T) {
 				t.Errorf("failure retention = %d, want %d", got, tt.wantFailureTTL)
 			}
 		})
+	}
+}
+
+// --- Security: unauthenticated API must not be exposed on a routable address ---
+
+func TestValidate_MonitoringAuthDisabledOnRoutableAddrRejected(t *testing.T) {
+	// With auth disabled every caller is treated as admin, including on the
+	// destructive endpoints. That is tolerable on loopback but not on an address
+	// anyone can reach, so the config must be refused rather than warned about.
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			name:    "auth off, all interfaces",
+			yaml:    "monitoring:\n  api:\n    enabled: true\n",
+			wantErr: true,
+		},
+		{
+			name:    "auth off, explicit wildcard",
+			yaml:    "monitoring:\n  api:\n    enabled: true\n    addr: \"0.0.0.0:8080\"\n",
+			wantErr: true,
+		},
+		{
+			name:    "auth off, routable host",
+			yaml:    "monitoring:\n  api:\n    enabled: true\n    addr: \"10.0.0.5:8080\"\n",
+			wantErr: true,
+		},
+		{
+			name:    "dashboard implies API, auth off, all interfaces",
+			yaml:    "monitoring:\n  dashboard:\n    enabled: true\n",
+			wantErr: true,
+		},
+		{
+			name:    "auth off but loopback IPv4",
+			yaml:    "monitoring:\n  api:\n    enabled: true\n    addr: \"127.0.0.1:8080\"\n",
+			wantErr: false,
+		},
+		{
+			name:    "auth off but loopback IPv6",
+			yaml:    "monitoring:\n  api:\n    enabled: true\n    addr: \"[::1]:8080\"\n",
+			wantErr: false,
+		},
+		{
+			name:    "auth off but localhost",
+			yaml:    "monitoring:\n  api:\n    enabled: true\n    addr: \"localhost:8080\"\n",
+			wantErr: false,
+		},
+		{
+			name:    "api key present satisfies the gate",
+			yaml:    "monitoring:\n  api:\n    enabled: true\n    api_keys:\n      - name: \"ci\"\n        key: \"gqm_ak_test_key_at_least_32_characters_long\"\n",
+			wantErr: false,
+		},
+		{
+			name:    "auth enabled satisfies the gate",
+			yaml:    "monitoring:\n  auth:\n    enabled: true\n    users:\n      - username: \"admin\"\n        password_hash: \"$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy\"\n  api:\n    enabled: true\n",
+			wantErr: false,
+		},
+		{
+			name:    "API disabled entirely is fine",
+			yaml:    "monitoring:\n  api:\n    enabled: false\n",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadConfig([]byte(tt.yaml))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected config to be rejected, got nil error")
+				}
+				if !strings.Contains(err.Error(), "auth is disabled") {
+					t.Errorf("error = %v, want it to mention the disabled auth gate", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestIsLoopbackAddr(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:8080", true},
+		{"127.0.0.53:8080", true},
+		{"localhost:8080", true},
+		{"[::1]:8080", true},
+		{":8080", false}, // every interface
+		{"0.0.0.0:8080", false},
+		{"[::]:8080", false},
+		{"10.0.0.5:8080", false},
+		{"example.com:8080", false}, // a name we cannot prove is loopback
+		{"8080", false},             // unparseable, must fail safe
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isLoopbackAddr(tt.addr); got != tt.want {
+			t.Errorf("isLoopbackAddr(%q) = %v, want %v", tt.addr, got, tt.want)
+		}
 	}
 }

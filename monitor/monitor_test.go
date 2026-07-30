@@ -63,6 +63,12 @@ func testLogger() *slog.Logger {
 	return slog.Default()
 }
 
+// doRequest models a request from the dashboard SPA, which sets X-GQM-CSRF on
+// every non-GET call (see monitor/dashboard/js/api.js). The header is required
+// for any non-API-key caller, including when auth is disabled — that is what
+// blocks a malicious page from driving a local unauthenticated instance through
+// the victim's browser. Tests that assert the requirement itself send their own
+// requests instead of using this helper.
 func doRequest(m *Monitor, method, path string, body string) *httptest.ResponseRecorder {
 	var req *http.Request
 	if body != "" {
@@ -71,6 +77,7 @@ func doRequest(m *Monitor, method, path string, body string) *httptest.ResponseR
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
+	req.Header.Set("X-GQM-CSRF", "1")
 	w := httptest.NewRecorder()
 	m.mux.ServeHTTP(w, req)
 	return w
@@ -751,17 +758,17 @@ func TestDLQ_ListEmpty(t *testing.T) {
 // --- Mock ServerAdmin ---
 
 type mockAdmin struct {
-	retryJobFn    func(ctx context.Context, jobID string) error
-	cancelJobFn   func(ctx context.Context, jobID string) error
-	deleteJobFn   func(ctx context.Context, jobID string) error
-	pauseQueueFn  func(ctx context.Context, queue string) error
-	resumeQueueFn func(ctx context.Context, queue string) error
-	emptyQueueFn  func(ctx context.Context, queue string) (int64, error)
-	retryAllDLQFn func(ctx context.Context, queue string) (int64, error)
-	clearDLQFn    func(ctx context.Context, queue string) (int64, error)
-	triggerCronFn func(ctx context.Context, cronID string) (string, error)
-	enableCronFn  func(ctx context.Context, cronID string) error
-	disableCronFn func(ctx context.Context, cronID string) error
+	retryJobFn      func(ctx context.Context, jobID string) error
+	cancelJobFn     func(ctx context.Context, jobID string) error
+	deleteJobFn     func(ctx context.Context, jobID string) error
+	pauseQueueFn    func(ctx context.Context, queue string) error
+	resumeQueueFn   func(ctx context.Context, queue string) error
+	emptyQueueFn    func(ctx context.Context, queue string) (int64, error)
+	retryAllDLQFn   func(ctx context.Context, queue string) (int64, error)
+	clearDLQFn      func(ctx context.Context, queue string) (int64, error)
+	triggerCronFn   func(ctx context.Context, cronID string) (string, error)
+	enableCronFn    func(ctx context.Context, cronID string) error
+	disableCronFn   func(ctx context.Context, cronID string) error
 	isQueuePausedFn func(ctx context.Context, queue string) (bool, error)
 }
 
@@ -2410,11 +2417,11 @@ func TestSecurity_ValidateStatusQueryParam(t *testing.T) {
 		status   string
 		wantCode int
 	}{
-		{"", http.StatusOK},              // default → ready
-		{"ready", http.StatusOK},         // explicit ready
-		{"processing", http.StatusOK},    // valid
-		{"completed", http.StatusOK},     // valid
-		{"dead_letter", http.StatusOK},   // valid
+		{"", http.StatusOK},            // default → ready
+		{"ready", http.StatusOK},       // explicit ready
+		{"processing", http.StatusOK},  // valid
+		{"completed", http.StatusOK},   // valid
+		{"dead_letter", http.StatusOK}, // valid
 		{"invalid", http.StatusBadRequest},
 		{"PROCESSING", http.StatusBadRequest}, // case sensitive
 		{"all", http.StatusBadRequest},
@@ -2525,19 +2532,6 @@ func TestSecurity_CSRF_APIKeyExempt(t *testing.T) {
 	w := doRequestWithAPIKey(m, "POST", "/api/v1/jobs/test-id/retry", "gqm_ak_admin_0123456789abcdefghijk")
 	if w.Code == http.StatusForbidden {
 		t.Fatalf("API key write: status = 403, API keys should be exempt from CSRF")
-	}
-}
-
-func TestSecurity_CSRF_AuthDisabledExempt(t *testing.T) {
-	m, _ := testMonitorWithAdmin(t, Config{
-		AuthEnabled: false,
-	}, &mockAdmin{})
-	m.startedAt = time.Now()
-
-	// No auth → no CSRF check needed
-	w := doRequest(m, "POST", "/api/v1/jobs/test-id/retry", "")
-	if w.Code == http.StatusForbidden {
-		t.Fatalf("auth disabled: status = 403, should not check CSRF")
 	}
 }
 
@@ -3498,7 +3492,7 @@ func TestListCron_MultipleEntriesSorted(t *testing.T) {
 
 func TestMapToJobResponse_DependsOn(t *testing.T) {
 	data := map[string]string{
-		"id":        "j1",
+		"id":         "j1",
 		"depends_on": `["j0"]`,
 	}
 	resp := mapToJobResponse(data)
@@ -3513,7 +3507,7 @@ func TestMapToJobResponse_DependsOn(t *testing.T) {
 
 func TestMapToJobResponse_DependsOnInvalidJSON(t *testing.T) {
 	data := map[string]string{
-		"id":        "j1",
+		"id":         "j1",
 		"depends_on": "not-json",
 	}
 	resp := mapToJobResponse(data)
@@ -3587,8 +3581,8 @@ func TestMapToJobResponse_ResultValidJSON(t *testing.T) {
 
 func TestMapToJobResponse_DisallowedFieldFiltered(t *testing.T) {
 	data := map[string]string{
-		"id":      "j1",
-		"secret":  "should-not-appear",
+		"id":     "j1",
+		"secret": "should-not-appear",
 	}
 	resp := mapToJobResponse(data)
 	if _, exists := resp["secret"]; exists {
@@ -5615,5 +5609,62 @@ func TestWorkers_ListWithData(t *testing.T) {
 	data := resp["data"].([]any)
 	if len(data) != 1 {
 		t.Errorf("workers = %d, want 1", len(data))
+	}
+}
+
+// --- Security: CSRF header required even when auth is disabled ---
+
+// With auth disabled the middleware stamps every request as admin, so nothing
+// else stands between a browser and the destructive endpoints. A malicious page
+// cannot set a custom header cross-origin without a CORS preflight that this
+// server never grants, so requiring X-GQM-CSRF is what stops a local
+// unauthenticated instance from being driven through a victim's browser.
+func TestSecurity_CSRFRequiredWhenAuthDisabled(t *testing.T) {
+	m, _ := testMonitorWithAdmin(t, Config{AuthEnabled: false}, &mockAdmin{})
+
+	destructive := []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/jobs/job-1/retry"},
+		{http.MethodPost, "/api/v1/jobs/job-1/cancel"},
+		{http.MethodDelete, "/api/v1/jobs/job-1"},
+		{http.MethodPost, "/api/v1/queues/default/pause"},
+		{http.MethodDelete, "/api/v1/queues/default/empty"},
+		{http.MethodDelete, "/api/v1/queues/default/dead-letter/clear"},
+		{http.MethodPost, "/api/v1/cron/entry-1/trigger"},
+	}
+
+	for _, tc := range destructive {
+		// No CSRF header: must be refused.
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		w := httptest.NewRecorder()
+		m.mux.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s %s without CSRF header = %d, want 403", tc.method, tc.path, w.Code)
+		}
+
+		// With the header: must get past the CSRF gate (any non-403 proves it).
+		req2 := httptest.NewRequest(tc.method, tc.path, nil)
+		req2.Header.Set("X-GQM-CSRF", "1")
+		w2 := httptest.NewRecorder()
+		m.mux.ServeHTTP(w2, req2)
+		if w2.Code == http.StatusForbidden {
+			t.Errorf("%s %s with CSRF header = 403, should pass the CSRF gate", tc.method, tc.path)
+		}
+	}
+}
+
+// API keys are not attached automatically by browsers, so they stay exempt.
+func TestSecurity_APIKeyExemptFromCSRF(t *testing.T) {
+	cfg := Config{
+		AuthEnabled: true,
+		APIKeys:     []AuthAPIKey{{Name: "ci", Key: "gqm_ak_test_key_at_least_32_characters_long", Role: "admin"}},
+	}
+	m, _ := testMonitorWithAdmin(t, cfg, &mockAdmin{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/queues/default/empty", nil)
+	req.Header.Set("X-API-Key", "gqm_ak_test_key_at_least_32_characters_long")
+	w := httptest.NewRecorder()
+	m.mux.ServeHTTP(w, req)
+	if w.Code == http.StatusForbidden {
+		t.Errorf("API key request without CSRF header = 403, want it exempt")
 	}
 }
