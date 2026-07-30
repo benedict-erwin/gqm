@@ -60,6 +60,11 @@ type serverConfig struct {
 	apiKeys        []AuthAPIKey
 	apiRateLimit   int // requests/second per IP; 0 = default (100), -1 = disabled
 
+	// trustProxy allows the client-supplied X-Forwarded-Proto header to decide
+	// whether a connection counts as HTTPS; cookieSecure states it outright.
+	trustProxy   bool
+	cookieSecure bool
+
 	// Retention windows in seconds, applied to terminal jobs that carry no
 	// per-job override. -1 retains permanently; 0 deletes immediately.
 	//
@@ -223,6 +228,28 @@ func WithAuthEnabled(enabled bool) ServerOption {
 	return func(cfg *serverConfig) { cfg.authEnabled = enabled }
 }
 
+// WithTrustProxy allows the X-Forwarded-Proto header to decide whether a
+// request counts as HTTPS when marking the session cookie Secure.
+//
+// The header comes from the client, so this is only safe when a proxy in front
+// of the server sets it and strips any incoming value. Leaving it off is not
+// dangerous on its own — see WithCookieSecure for the case that is.
+func WithTrustProxy(trust bool) ServerOption {
+	return func(cfg *serverConfig) { cfg.trustProxy = trust }
+}
+
+// WithCookieSecure marks the session cookie Secure regardless of how the
+// connection looks to the server.
+//
+// Use this behind a TLS terminating proxy. Without it the server sees plain
+// HTTP on the proxy-to-app hop, issues the cookie without Secure and with only
+// SameSite=Lax, and the browser will then send the session token over plain
+// HTTP. Stating the deployment fact is more reliable than inferring it from a
+// header the proxy may not send.
+func WithCookieSecure(secure bool) ServerOption {
+	return func(cfg *serverConfig) { cfg.cookieSecure = secure }
+}
+
 // WithAuthUsers sets the users for the monitoring API.
 func WithAuthUsers(users []AuthUser) ServerOption {
 	return func(cfg *serverConfig) { cfg.authUsers = users }
@@ -330,6 +357,8 @@ func NewServer(opts ...ServerOption) (*Server, error) {
 			DashPathPrefix: cfg.dashPathPrefix,
 			DashCustomDir:  cfg.dashCustomDir,
 			RateLimit:      cfg.apiRateLimit,
+			TrustProxy:     cfg.trustProxy,
+			CookieSecure:   cfg.cookieSecure,
 		}
 		for _, u := range cfg.authUsers {
 			monCfg.AuthUsers = append(monCfg.AuthUsers, monitor.AuthUser{

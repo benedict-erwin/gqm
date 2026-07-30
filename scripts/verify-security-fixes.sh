@@ -486,6 +486,80 @@ else
 fi
 
 # ===========================================================================
+head_ "I-01  A client header must not decide the session cookie's Secure flag"
+# ===========================================================================
+# X-Forwarded-Proto is supplied by the client. Trusting it unconditionally fails
+# safe on its own, but the knobs that replace it exist for the opposite case:
+# behind a proxy that terminates TLS and sends no header, the cookie went out
+# without Secure and the browser would send the token over plain HTTP.
+
+# Cost 4 keeps the harness fast; this is a throwaway credential.
+HASH='$2a$04$mkaqsrvzGVI759PKhrd8yOdBSSIZ87tWEgdEnrGwFJ5g4Ywl9hP0m'
+write_auth_config() { # $1=path  $2=extra api yaml
+  cat > "$1" <<YAML
+redis:
+  addr: "$REDIS_ADDR"
+  prefix: "gqm:verify:"
+app:
+  log_level: "error"
+monitoring:
+  api:
+    enabled: true
+    addr: "127.0.0.1:$PORT"
+$2
+  auth:
+    enabled: true
+    users:
+      - username: "alice"
+        password_hash: "$HASH"
+        role: "viewer"
+YAML
+}
+
+login_cookie_flags() { # $1=extra curl args... -> prints the Set-Cookie line
+  curl -s -D - -o /dev/null -X POST \
+    -H 'Content-Type: application/json' \
+    --data '{"username":"alice","password":"verifypw"}' \
+    "$@" "http://127.0.0.1:$PORT/auth/login" | grep -i '^set-cookie:'
+}
+
+write_auth_config "$WORK/xfp-default.yaml" ""
+if start_server "$WORK/xfp-default.yaml"; then
+  sc=$(login_cookie_flags -H 'X-Forwarded-Proto: https')
+  if grep -qi 'secure' <<<"$sc"; then
+    bad "forged X-Forwarded-Proto does not set Secure" "a cookie without Secure" "$(head -c 160 <<<"$sc")"
+  else
+    ok "forged X-Forwarded-Proto does not set Secure"
+  fi
+  stop_server
+else
+  bad "auth server starts" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
+fi
+
+write_auth_config "$WORK/xfp-trust.yaml" "    trust_proxy: true"
+if start_server "$WORK/xfp-trust.yaml"; then
+  sc=$(login_cookie_flags -H 'X-Forwarded-Proto: https')
+  grep -qi 'secure' <<<"$sc" \
+    && ok "X-Forwarded-Proto is honoured once trust_proxy is set" \
+    || bad "X-Forwarded-Proto honoured with trust_proxy" "a cookie with Secure" "$(head -c 160 <<<"$sc")"
+  stop_server
+else
+  bad "trust_proxy server starts" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
+fi
+
+write_auth_config "$WORK/cookie-secure.yaml" "    cookie_secure: true"
+if start_server "$WORK/cookie-secure.yaml"; then
+  sc=$(login_cookie_flags)
+  grep -qi 'secure' <<<"$sc" \
+    && ok "cookie_secure marks the cookie Secure with no header at all" \
+    || bad "cookie_secure marks the cookie Secure" "a cookie with Secure" "$(head -c 160 <<<"$sc")"
+  stop_server
+else
+  bad "cookie_secure server starts" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
+fi
+rctl delpattern "gqm:verify:session:*"
+
+# ===========================================================================
 head_ "L-01  gqm init must not leave credentials world-readable"
 # ===========================================================================
 # The config file is where credentials live, and an API key has to sit there in

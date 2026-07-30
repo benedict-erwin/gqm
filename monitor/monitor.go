@@ -22,6 +22,16 @@ type Config struct {
 	DashPathPrefix string
 	DashCustomDir  string
 	RateLimit      int // requests/second per IP; 0 = default (100), -1 = disabled
+
+	// TrustProxy allows X-Forwarded-Proto to decide whether the connection is
+	// HTTPS. Leave it off unless a proxy in front of this server sets that
+	// header, since any client can send it.
+	TrustProxy bool
+	// CookieSecure marks the session cookie Secure regardless of what the
+	// connection looks like from here. This is what to set behind a TLS
+	// terminating proxy: it states the deployment fact instead of inferring it
+	// from a header the proxy may not send.
+	CookieSecure bool
 }
 
 // AuthUser represents a user credential.

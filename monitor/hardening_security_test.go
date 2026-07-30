@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // --- L-03: body-parsing endpoints must insist on a JSON content type ---
@@ -207,4 +209,96 @@ func doFullChainRequest(m *Monitor, method, path string) *httptest.ResponseRecor
 	w := httptest.NewRecorder()
 	m.server.Handler.ServeHTTP(w, req)
 	return w
+}
+
+// --- I-01: the session cookie's Secure flag must not hinge on a client header ---
+
+// The flag has to be observable on a real Set-Cookie, not just in the helper:
+// the helper being right is worthless if the handler stops calling it.
+func TestSecurity_SessionCookieSecureFlag(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hashing: %v", err)
+	}
+
+	login := func(m *Monitor, xfp string) *http.Cookie {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/auth/login",
+			strings.NewReader(`{"username":"alice","password":"pw"}`))
+		req.Header.Set("Content-Type", "application/json")
+		if xfp != "" {
+			req.Header.Set("X-Forwarded-Proto", xfp)
+		}
+		w := httptest.NewRecorder()
+		m.mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("login failed: %d — %s", w.Code, w.Body.String())
+		}
+		for _, c := range w.Result().Cookies() {
+			if c.Name == sessionCookieName {
+				return c
+			}
+		}
+		t.Fatal("no session cookie was set")
+		return nil
+	}
+
+	base := func(extra func(*Config)) Config {
+		c := Config{
+			AuthEnabled:    true,
+			AuthSessionTTL: 86400,
+			AuthUsers: []AuthUser{
+				{Username: "alice", PasswordHash: string(hash), Role: "viewer"},
+			},
+		}
+		if extra != nil {
+			extra(&c)
+		}
+		return c
+	}
+
+	t.Run("forged header is ignored by default", func(t *testing.T) {
+		m, _ := testMonitorWithAdmin(t, base(nil), &mockAdmin{})
+		c := login(m, "https")
+		if c.Secure {
+			t.Error("cookie marked Secure because the client claimed https")
+		}
+		if c.SameSite != http.SameSiteLaxMode {
+			t.Errorf("SameSite = %v, want Lax for a plain HTTP session", c.SameSite)
+		}
+	})
+
+	t.Run("header is honoured when the proxy is trusted", func(t *testing.T) {
+		m, _ := testMonitorWithAdmin(t, base(func(c *Config) { c.TrustProxy = true }), &mockAdmin{})
+		c := login(m, "https")
+		if !c.Secure {
+			t.Error("cookie not marked Secure despite TrustProxy and X-Forwarded-Proto: https")
+		}
+		if c.SameSite != http.SameSiteStrictMode {
+			t.Errorf("SameSite = %v, want Strict over HTTPS", c.SameSite)
+		}
+	})
+
+	t.Run("CookieSecure covers a proxy that sends no header", func(t *testing.T) {
+		m, _ := testMonitorWithAdmin(t, base(func(c *Config) { c.CookieSecure = true }), &mockAdmin{})
+		c := login(m, "")
+		if !c.Secure {
+			t.Error("CookieSecure did not mark the session cookie Secure")
+		}
+	})
+
+	// Logout clears the cookie, and the clearing cookie must carry the same
+	// flags — a mismatched Secure flag means the browser keeps the old one.
+	t.Run("logout cookie matches the login cookie flags", func(t *testing.T) {
+		m, _ := testMonitorWithAdmin(t, base(func(c *Config) { c.CookieSecure = true }), &mockAdmin{})
+		req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+		req.Header.Set("X-GQM-CSRF", "1")
+		w := httptest.NewRecorder()
+		m.mux.ServeHTTP(w, req)
+		for _, c := range w.Result().Cookies() {
+			if c.Name == sessionCookieName && !c.Secure {
+				t.Error("logout cookie not marked Secure while CookieSecure is set")
+			}
+		}
+	})
 }

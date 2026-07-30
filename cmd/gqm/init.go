@@ -79,6 +79,11 @@ monitoring:
   api:
     enabled: false             # Set to true to enable HTTP API
     addr: ":8080"
+    # cookie_secure: true      # Set when TLS is terminated by a proxy, so the
+                               # session cookie is marked Secure. Without it the
+                               # browser will send the token over plain HTTP.
+    # trust_proxy: true        # Let X-Forwarded-Proto decide instead. Only safe
+                               # if a proxy sets it and strips client values.
     # api_keys:
     #   - name: "my-key"
     #     key: ""              # Generate with: gqm generate-api-key

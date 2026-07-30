@@ -242,6 +242,12 @@ monitoring:
   api:
     enabled: true
     addr: ":8080"
+    # Behind a TLS-terminating proxy, set cookie_secure so the session cookie
+    # is marked Secure — otherwise the browser will send the token over plain
+    # HTTP. trust_proxy lets X-Forwarded-Proto decide instead, and is only
+    # safe when a proxy sets that header and strips any incoming value.
+    # cookie_secure: true
+    # trust_proxy: true
     api_keys:
       - name: "grafana"
         key: ""                   # gqm add-api-key grafana

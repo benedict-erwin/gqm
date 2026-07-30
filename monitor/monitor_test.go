@@ -4702,24 +4702,58 @@ func TestExtractIP_NoPort(t *testing.T) {
 // isSecure
 
 func TestIsSecure_TLS(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.TLS = &tls.ConnectionState{}
-	if !isSecure(req) {
+	if !m.isSecure(req) {
 		t.Error("expected isSecure=true for TLS")
 	}
 }
 
-func TestIsSecure_XForwardedProto(t *testing.T) {
+// X-Forwarded-Proto comes from the client. This test used to assert it was
+// trusted unconditionally, which made a client-supplied header the deciding
+// input for a cookie security flag. It is now consulted only when the operator
+// has said a proxy sets it.
+func TestIsSecure_XForwardedProtoIgnoredWithoutTrustProxy(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("X-Forwarded-Proto", "https")
-	if !isSecure(req) {
-		t.Error("expected isSecure=true for X-Forwarded-Proto=https")
+	if m.isSecure(req) {
+		t.Error("X-Forwarded-Proto was trusted without TrustProxy set")
+	}
+}
+
+func TestIsSecure_XForwardedProtoHonouredWithTrustProxy(t *testing.T) {
+	m, _ := testMonitor(t, Config{TrustProxy: true})
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if !m.isSecure(req) {
+		t.Error("expected isSecure=true for X-Forwarded-Proto=https with TrustProxy")
+	}
+
+	// A proxy that reports plain HTTP must still mean plain HTTP.
+	req2 := httptest.NewRequest("GET", "/test", nil)
+	req2.Header.Set("X-Forwarded-Proto", "http")
+	if m.isSecure(req2) {
+		t.Error("expected isSecure=false for X-Forwarded-Proto=http")
+	}
+}
+
+// The case the finding was actually about: TLS terminated at a proxy that does
+// not set the header. Without CookieSecure the cookie goes out without Secure
+// and the browser will send the session token over plain HTTP.
+func TestIsSecure_CookieSecureForcesSecure(t *testing.T) {
+	m, _ := testMonitor(t, Config{CookieSecure: true})
+	req := httptest.NewRequest("GET", "/test", nil)
+	if !m.isSecure(req) {
+		t.Error("CookieSecure did not force the cookie to be marked Secure")
 	}
 }
 
 func TestIsSecure_PlainHTTP(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
 	req := httptest.NewRequest("GET", "/test", nil)
-	if isSecure(req) {
+	if m.isSecure(req) {
 		t.Error("expected isSecure=false for plain HTTP")
 	}
 }

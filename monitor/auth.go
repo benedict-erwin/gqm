@@ -154,9 +154,28 @@ func effectiveRole(role string) string {
 	return role
 }
 
-// isSecure reports whether the request was made over HTTPS.
-func isSecure(r *http.Request) bool {
-	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+// isSecure reports whether the session cookie should be marked Secure.
+//
+// X-Forwarded-Proto is supplied by the client, so it is only consulted when the
+// operator has said a proxy sets it. Trusting it unconditionally failed safe —
+// a client claiming https over plaintext gets a Secure cookie its own browser
+// then refuses to send back, which harms only that client, and the header
+// cannot be set cross-site on a victim's request.
+//
+// The real exposure runs the other way. Behind a proxy that terminates TLS but
+// does not set the header, the cookie was issued without Secure and with only
+// SameSite=Lax, so a 256-bit session token crossed the proxy-to-app hop in
+// cleartext and the browser was willing to send it over plain HTTP.
+// CookieSecure is the answer to that: it states the deployment fact directly
+// rather than inferring it from a header that may never arrive.
+func (m *Monitor) isSecure(r *http.Request) bool {
+	if m.cfg.CookieSecure {
+		return true
+	}
+	if r.TLS != nil {
+		return true
+	}
+	return m.cfg.TrustProxy && r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
 // handleLogin authenticates a user and creates a session.
@@ -251,7 +270,7 @@ func (m *Monitor) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Set cookie — Secure only over HTTPS to avoid cookie rejection on plain HTTP
 	sameSite := http.SameSiteLaxMode
-	if isSecure(r) {
+	if m.isSecure(r) {
 		sameSite = http.SameSiteStrictMode
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -259,7 +278,7 @@ func (m *Monitor) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   isSecure(r),
+		Secure:   m.isSecure(r),
 		SameSite: sameSite,
 		MaxAge:   m.cfg.AuthSessionTTL,
 	})
@@ -279,7 +298,7 @@ func (m *Monitor) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 	// Clear cookie — match Secure flag to the request scheme
 	sameSite := http.SameSiteLaxMode
-	if isSecure(r) {
+	if m.isSecure(r) {
 		sameSite = http.SameSiteStrictMode
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -287,7 +306,7 @@ func (m *Monitor) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   isSecure(r),
+		Secure:   m.isSecure(r),
 		SameSite: sameSite,
 		MaxAge:   -1,
 	})

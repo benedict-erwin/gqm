@@ -129,6 +129,16 @@ type APIConfig struct {
 	Addr      string       `yaml:"addr"`       // default ":8080"
 	RateLimit int          `yaml:"rate_limit"` // requests/second per IP; 0 = default (100), -1 = disabled
 	APIKeys   []APIKeyYAML `yaml:"api_keys"`
+
+	// TrustProxy allows the client-supplied X-Forwarded-Proto header to decide
+	// whether the connection counts as HTTPS. Only enable it when a proxy in
+	// front of this server sets that header.
+	TrustProxy bool `yaml:"trust_proxy"`
+	// CookieSecure marks the session cookie Secure unconditionally. Set this
+	// when TLS is terminated by a proxy: without it the cookie is issued
+	// without Secure and the browser will send the session token over plain
+	// HTTP.
+	CookieSecure bool `yaml:"cookie_secure"`
 }
 
 // APIKeyYAML holds an API key entry from YAML.
@@ -616,6 +626,8 @@ func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 	if mon.API.Enabled {
 		serverOpts = append(serverOpts, func(sc *serverConfig) {
 			sc.apiRateLimit = mon.API.RateLimit
+			sc.trustProxy = mon.API.TrustProxy
+			sc.cookieSecure = mon.API.CookieSecure
 			sc.authSessionTTL = mon.Auth.SessionTTL
 			for _, u := range mon.Auth.Users {
 				sc.authUsers = append(sc.authUsers, AuthUser{
