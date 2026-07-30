@@ -93,6 +93,10 @@ type meta struct {
 	Page  int `json:"page"`
 	Limit int `json:"limit"`
 	Total int `json:"total"`
+	// Truncated reports that a bounded scan stopped before exhausting the
+	// keyspace, so Total is a floor rather than the real count. Omitted when
+	// false: a silently truncated result reads as a complete one.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // errorResponse is the standard JSON envelope for errors.

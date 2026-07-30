@@ -3,10 +3,34 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/redis/go-redis/v9"
+)
+
+// Bounds for the DAG root scan. The endpoint is read-only, so a viewer can
+// reach it; without these an authenticated read-only client could turn one HTTP
+// request into millions of Redis commands and stall the workers that share the
+// connection.
+// These are variables rather than constants only so tests can shrink them;
+// nothing outside this package can reach them, and nothing in it writes them at
+// run time. Exercising the caps with their real values would mean seeding a
+// hundred thousand keys per test.
+var (
+	// dagScanCount is the COUNT hint per SCAN call. Higher than the Redis
+	// default of 10 so a full pass costs fewer round trips.
+	dagScanCount int64 = 1000
+	// dagScanMaxCalls caps round trips, and with them the keys examined —
+	// roughly dagScanCount each, so about 100k keys per request.
+	dagScanMaxCalls = 100
+	// dagScanMaxRoots caps how many root IDs are collected in memory.
+	dagScanMaxRoots = 5000
+	// dagScanTimeout is the wall-clock backstop, since a COUNT hint is only a
+	// hint and a slow Redis can make even a bounded number of calls take long.
+	dagScanTimeout = 5 * time.Second
 )
 
 // dagNode represents a node in the DAG graph response.
@@ -129,27 +153,60 @@ func (m *Monitor) fetchDeferredJobs(ctx context.Context, jobIDs []string) []map[
 //
 //	GET /api/v1/dag/roots?page=1&limit=20
 func (m *Monitor) handleListDAGRoots(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	// A real deadline. http.Server's WriteTimeout does not cancel r.Context(),
+	// so without this the scan below has nothing to stop it.
+	ctx, cancel := context.WithTimeout(r.Context(), dagScanTimeout)
+	defer cancel()
 	page, limit := pagination(r)
 
-	// SCAN for keys matching prefix:job:*:dependents
+	// SCAN for keys matching prefix:job:*:dependents.
+	//
+	// Redis applies MATCH after iterating, so the cost is O(keys in the db)
+	// rather than O(keys that match) — the pattern saves nothing. The cursor is
+	// driven by hand rather than with the iterator helper because the iterator
+	// only yields matching keys: counting its iterations would bound the
+	// matches while leaving the actual work unbounded, which is the whole
+	// problem. Bounding the number of round trips bounds the keys examined,
+	// since each call examines roughly dagScanCount of them.
 	pattern := m.key("job", "*", "dependents")
 	var allIDs []string
 	seen := make(map[string]bool)
+	truncated := false
 
-	iter := m.rdb.Scan(ctx, 0, pattern, 100).Iterator()
-	for iter.Next(ctx) {
-		// Key format: prefix:job:{id}:dependents — extract the job ID.
-		key := iter.Val()
-		parts := extractJobIDFromDependentsKey(key, m.prefix)
-		if parts != "" && !seen[parts] {
-			seen[parts] = true
-			allIDs = append(allIDs, parts)
+	var cursor uint64
+	for calls := 0; ; calls++ {
+		if calls >= dagScanMaxCalls {
+			truncated = true
+			break
 		}
-	}
-	if err := iter.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to scan DAG roots", "INTERNAL")
-		return
+		keys, next, err := m.rdb.Scan(ctx, cursor, pattern, dagScanCount).Result()
+		if err != nil {
+			// A deadline hit mid-scan is a truncated answer, not a failure:
+			// the page assembled so far is still correct as far as it goes.
+			if errors.Is(err, context.DeadlineExceeded) {
+				truncated = true
+				break
+			}
+			writeError(w, http.StatusInternalServerError, "failed to scan DAG roots", "INTERNAL")
+			return
+		}
+		for _, key := range keys {
+			// Key format: prefix:job:{id}:dependents — extract the job ID.
+			id := extractJobIDFromDependentsKey(key, m.prefix)
+			if id != "" && !seen[id] {
+				seen[id] = true
+				allIDs = append(allIDs, id)
+			}
+		}
+		if len(allIDs) >= dagScanMaxRoots {
+			allIDs = allIDs[:dagScanMaxRoots]
+			truncated = true
+			break
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
 	}
 
 	sort.Strings(allIDs)
@@ -160,7 +217,7 @@ func (m *Monitor) handleListDAGRoots(w http.ResponseWriter, r *http.Request) {
 	if start >= total {
 		writeJSON(w, http.StatusOK, response{
 			Data: []any{},
-			Meta: &meta{Page: page, Limit: limit, Total: total},
+			Meta: &meta{Page: page, Limit: limit, Total: total, Truncated: truncated},
 		})
 		return
 	}
@@ -194,7 +251,7 @@ func (m *Monitor) handleListDAGRoots(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, response{
 		Data: jobs,
-		Meta: &meta{Page: page, Limit: limit, Total: total},
+		Meta: &meta{Page: page, Limit: limit, Total: total, Truncated: truncated},
 	})
 }
 

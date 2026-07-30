@@ -168,6 +168,13 @@ GQM.pages.dag = {
             });
 
             html += '</tbody></table></div>';
+            // The scan behind this endpoint is bounded, so on a large keyspace
+            // the total is a floor rather than the real count. Say so: a count
+            // that is quietly short reads as the whole picture.
+            if (meta.truncated) {
+                html += '<p class="text-secondary text-sm">Showing the first ' +
+                    esc(meta.total || 0) + ' chains — the scan was capped, so more may exist.</p>';
+            }
             html += GQM.utils.paginationHTML(meta.page || 1, meta.limit || 20, meta.total || 0);
             el.innerHTML = html;
 

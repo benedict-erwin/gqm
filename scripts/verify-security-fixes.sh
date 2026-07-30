@@ -114,6 +114,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -137,6 +138,38 @@ func main() {
 		fmt.Println(n)
 	case "del": // del <key>
 		rdb.Del(ctx, os.Args[3])
+	case "seedroots": // seedroots <prefix> <n> — n job hashes that each look like a DAG root
+		n, _ := strconv.Atoi(os.Args[4])
+		pipe := rdb.Pipeline()
+		for i := 0; i < n; i++ {
+			id := fmt.Sprintf("root%06d", i)
+			pipe.HSet(ctx, os.Args[3]+"job:"+id, "id", id, "type", "t", "status", "completed")
+			pipe.SAdd(ctx, os.Args[3]+"job:"+id+":dependents", "child")
+			if i%1000 == 999 {
+				if _, err := pipe.Exec(ctx); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+				pipe = rdb.Pipeline()
+			}
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "delpattern": // delpattern <pattern>
+		iter := rdb.Scan(ctx, 0, os.Args[3], 1000).Iterator()
+		var batch []string
+		for iter.Next(ctx) {
+			batch = append(batch, iter.Val())
+			if len(batch) >= 1000 {
+				rdb.Del(ctx, batch...)
+				batch = batch[:0]
+			}
+		}
+		if len(batch) > 0 {
+			rdb.Del(ctx, batch...)
+		}
 	}
 }
 GOF
@@ -375,6 +408,75 @@ if start_server "$WORK/nopass.yaml"; then
 else
   bad "unprotected Redis still allowed to start" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
 fi
+
+# ===========================================================================
+head_ "M-03  /api/v1/dag/roots must bound its scan and admit when it truncates"
+# ===========================================================================
+# The endpoint is read-only, so a viewer reaches it. It used to SCAN the whole
+# keyspace with pagination applied only afterwards, so limit=1 cost the same as
+# limit=all. Seeded past the 5000-root cap so the bound is exercised at its real
+# production value, not a shrunken test one.
+
+rctl delpattern "gqm:verify:job:root*"
+rctl seedroots "gqm:verify:" 6000
+
+write_config "$WORK/dagroots.yaml" "127.0.0.1:$PORT" ""
+if start_server "$WORK/dagroots.yaml"; then
+  body=$(curl -s "http://127.0.0.1:$PORT/api/v1/dag/roots?limit=1")
+  if grep -q '"truncated":true' <<<"$body"; then
+    ok "scan stops at the root cap and reports truncated"
+  else
+    bad "scan stops at the root cap and reports truncated" \
+        '"truncated":true in the response meta' "$(head -c 200 <<<"$body")"
+  fi
+  if grep -qE '"total":5000\b' <<<"$body"; then
+    ok "collected roots are capped at 5000, not the full 6000"
+  else
+    bad "collected roots are capped at 5000" '"total":5000' \
+        "$(grep -o '\"total\":[0-9]*' <<<"$body" | head -1)"
+  fi
+
+  # Regression guard, not proof of the deadline: this database is far too small
+  # to make an unbounded scan slow, so it stays green with the caps removed. It
+  # is here to catch a fix that makes the endpoint pathologically slow instead.
+  t0=$(date +%s)
+  code -o /dev/null "http://127.0.0.1:$PORT/api/v1/dag/roots?limit=1" >/dev/null
+  elapsed=$(( $(date +%s) - t0 ))
+  (( elapsed <= 10 )) && ok "endpoint still responds promptly (${elapsed}s)" \
+                      || bad "endpoint still responds promptly" "<= 10s" "${elapsed}s"
+  stop_server
+else
+  bad "dag roots server starts" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
+fi
+rctl delpattern "gqm:verify:job:root*"
+
+# ===========================================================================
+head_ "M-02  Committed compose files must not publish Redis on every interface"
+# ===========================================================================
+# The Redis image runs with `bind * -::*` and protected-mode off, so the publish
+# binding is the only thing between an unauthenticated session store and the
+# local network. This is a static check of the committed files: the running
+# container keeps whatever binding it was created with until it is recreated.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+for f in docker-compose.yml .devcontainer/docker-compose.yml; do
+  path="$REPO_ROOT/$f"
+  if [[ ! -f "$path" ]]; then
+    bad "$f exists to be checked" "the file to be present" "not found at $path"
+    continue
+  fi
+  # Port mappings are list items; anything else mentioning 6379 (healthcheck,
+  # command) is not a publish directive.
+  bare=$(grep -nE '^[[:space:]]*-[[:space:]]*"?[^"#]*6379' "$path" \
+         | grep -vE '"?127\.0\.0\.1:|"?localhost:|"?\[::1\]:' || true)
+  if [[ -z "$bare" ]]; then
+    ok "$f publishes Redis on loopback only (or not at all)"
+  else
+    bad "$f publishes Redis on loopback only" \
+        "every 6379 mapping prefixed with 127.0.0.1, or no mapping" \
+        "$(tr '\n' ' ' <<<"$bare")"
+  fi
+done
 
 # ===========================================================================
 printf '\n\033[1mSummary\033[0m\n'
