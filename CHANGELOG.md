@@ -5,7 +5,59 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-07-31
+
+Security release. Every finding from a full whitebox audit is addressed, and the
+defaults that resolved ambiguity toward `admin` now resolve toward least
+privilege instead.
+
+**This release changes behaviour that existing deployments depend on.** Read
+Upgrading before you take it.
+
+### Upgrading from 0.1.x
+
+**Terminal jobs now expire.** This is the one that fails quietly. Completed jobs
+are removed after 7 days and dead-lettered, canceled and stopped jobs after 30 —
+previously they were kept forever. Nothing breaks at startup; records simply
+begin disappearing a week after you upgrade. To keep the old behaviour:
+
+```yaml
+app:
+  result_ttl: -1     # keep completed jobs forever
+  failure_ttl: -1    # keep dead-lettered, canceled, stopped forever
+```
+
+Any value is accepted: seconds as a positive integer, `-1` for permanent, `0` to
+delete on completion. The same knobs exist as `WithResultTTL()`/`WithFailureTTL()`
+and per job as `ResultTTL()`/`FailureTTL()`, and a per-job value wins over the
+server default. Keeping jobs forever means their memory is never reclaimed and
+they stay outside Redis `volatile-*` eviction, which only considers keys with an
+expiry.
+
+**A server with auth disabled on a routable address now refuses to start.** This
+one fails loudly, at startup, before serving anything. With auth off every caller
+is treated as admin, including on destructive endpoints. Either enable
+`monitoring.auth.enabled`, add `monitoring.api.api_keys`, or bind to loopback
+(`127.0.0.1:8080`). Loopback with auth off still starts, which is the local
+development case.
+
+**Job IDs may no longer contain a colon.** `Enqueue` returns `ErrInvalidJobID`.
+If you derive IDs from an external identifier that may contain one, replace it
+with a hyphen or underscore first. Job types and queue names are unaffected, so
+the `namespace:action` convention still works.
+
+**A user or API key with no explicit `role` is now `viewer`, not `admin`.** Set
+`role: admin` explicitly for the credentials that need it.
+
+**Custom API clients need two headers.** `POST /auth/login` and the batch
+endpoints now require `Content-Type: application/json` and return 415 without it.
+`POST /auth/logout` now requires `X-GQM-CSRF: 1` for cookie auth and returns 403
+without it. The bundled dashboard and TUI already comply; only hand-written
+clients are affected. API keys remain exempt from the CSRF requirement.
+
+**`gqm init` writes the config as `0600`**, and `set-password`/`add-api-key`
+tighten a group- or world-readable config when they write to it, reporting the
+change on stderr.
 
 ### Security
 - **Dashboard `custom_dir` no longer serves arbitrary files** — the dashboard route is unauthenticated by design, which was safe for the embedded assets but not for an operator-supplied directory. Serving is now restricted to an allowlist of asset extensions with dot-prefixed paths rejected, so a directory that also holds `gqm.yaml`, dotenv files, or backups can no longer leak them. Applies to the embedded assets too
@@ -26,16 +78,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`/api/v1/dag/roots` no longer scans the keyspace without a bound** — Redis applies `MATCH` after iterating, so the cost was O(keys in the database) no matter how few matched, and pagination was applied only after the scan finished, making `limit=1` cost the same as `limit=all`. The endpoint is read-only, so a viewer could turn one request into millions of Redis commands against the instance the workers depend on. Round trips, collected roots, and wall-clock are now all capped, and the response carries `meta.truncated` so a short count cannot be read as a complete one
 
 ### Added
+- **Job retention** — terminal jobs now expire instead of accumulating forever. `result_ttl` (default 7 days) covers completed jobs; `failure_ttl` (default 30 days) covers dead-lettered, canceled, and stopped ones. Configurable via `app.result_ttl`/`app.failure_ttl`, `WithResultTTL()`/`WithFailureTTL()`, or per job with `ResultTTL()`/`FailureTTL()`. `TTLPermanent` retains forever, `0` deletes on completion, and a per-job value wins over the server default
+- **Terminal sorted set trimming** — `:completed` and `:dead_letter` are trimmed by score inside the existing terminal Lua scripts, so a set entry never outlives the job hash it points to
+- **`WithTrustProxy()` / `api.trust_proxy` and `WithCookieSecure()` / `api.cookie_secure`** — control whether `X-Forwarded-Proto` decides the session cookie's `Secure` flag, and force it on behind a TLS-terminating proxy
 - **`AcknowledgeUnprotectedRedis()`** — states in code that a password-less Redis is a deliberate choice, and silences the startup banner for the process. Deliberately a function call rather than a config field or environment variable: it belongs in source, where it appears in a diff, survives review and can be grepped, following `tls.Config.InsecureSkipVerify`. A setting outside the code travels between environments unnoticed, which is how an acknowledgement made for local development ends up silencing production
 - **CI security workflow** — `vet`, `gofmt`, `go test -race`, and `govulncheck` on every push and pull request, with the stress suite on a weekly schedule. Actions are pinned to commit SHAs rather than tags, and the token is restricted to `contents: read`. The build also fails when Redis-backed tests *skip*: a suite that skips is not a suite that passed, and `go test` reports `ok` when Redis is unreachable. The TUI is a separate module, so `go test ./...` at the root never reached it — CI now runs it explicitly
 
 ### Changed
-- **Dependencies updated** — `golang.org/x/crypto` 0.48.0 → 0.54.0, `golang.org/x/sys` 0.41.0 → 0.47.0, `go-redis` 9.17.3 → 9.21.0. `govulncheck` reported nothing this code calls, but 15 advisories in required modules; none was reachable, since only `x/crypto/bcrypt` is imported while the advisories sit in the ssh and FIDO packages. Unreachable still means every module-level scanner flags them for downstream users. Now down to one, `GO-2026-5932`, which has no fix and covers `x/crypto/openpgp` — not vendored and not importable here
 - **BREAKING: job IDs may no longer contain a colon** — GQM joins Redis key segments with a colon, and a job owns a bare key as well as suffixed ones (`gqm:job:<id>` alongside `gqm:job:<id>:deps`, `:pending_deps`, `:dependents`). A job with the ID `order-42:deps` therefore occupied exactly the key job `order-42` needed for its dependency set; because the two hold different Redis types, the victim's enqueue failed with `WRONGTYPE`. The `:dependents` variant blocked every child of the targeted parent. `Enqueue` now returns `ErrInvalidJobID` for such an ID, and the API rejects it as a path parameter. **Job types and queue names are unaffected** — they own no sub-keys, so the `namespace:action` convention still works. This restores the contract `ErrInvalidJobID` always documented ("only alphanumeric, hyphen, underscore, dot allowed"); the regex was simply more permissive than the promise. Generated UUIDv7 IDs are unaffected
-
-### Added
-- **Job retention** — terminal jobs now expire instead of accumulating forever. `result_ttl` (default 7 days) covers completed jobs; `failure_ttl` (default 30 days) covers dead-lettered, canceled, and stopped ones. Configurable via `app.result_ttl`/`app.failure_ttl`, `WithResultTTL()`/`WithFailureTTL()`, or per job with `ResultTTL()`/`FailureTTL()`. `TTLPermanent` retains forever, `0` deletes on completion
-- **Terminal sorted set trimming** — `:completed` and `:dead_letter` are trimmed by score inside the existing terminal Lua scripts, so a set entry never outlives the job hash it points to
+- **`meta.truncated`** — pagination envelopes carry it when a bounded scan stopped early, so a short total cannot be read as a complete one. Omitted when false, so no existing response shape changes
+- **Dependencies updated** — `golang.org/x/crypto` 0.48.0 → 0.54.0, `golang.org/x/sys` 0.41.0 → 0.47.0, `go-redis` 9.17.3 → 9.21.0. `govulncheck` reported nothing this code calls, but 15 advisories in required modules; none was reachable, since only `x/crypto/bcrypt` is imported while the advisories sit in the ssh and FIDO packages. Unreachable still means every module-level scanner flags them for downstream users. Now down to one, `GO-2026-5932`, which has no fix and covers `x/crypto/openpgp` — not vendored and not importable here
 
 ### Fixed
 - **Unbounded Redis growth** — every terminal job previously left a permanent `gqm:job:<id>` hash plus a sorted set entry, with no reclaim path. Measured cost is ~1.5 KB per retained job
@@ -156,5 +208,7 @@ Initial feature-complete release. All planned phases (1–7) implemented.
 
 TUI module additionally uses `bubbletea` and `lipgloss` (Charm ecosystem).
 
+[0.2.0]: https://github.com/benedict-erwin/gqm/releases/tag/v0.2.0
+[0.1.2]: https://github.com/benedict-erwin/gqm/releases/tag/v0.1.2
 [0.1.1]: https://github.com/benedict-erwin/gqm/releases/tag/v0.1.1
 [0.1.0]: https://github.com/benedict-erwin/gqm/releases/tag/v0.1.0
