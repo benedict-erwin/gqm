@@ -282,7 +282,7 @@ func extractJobIDFromDependentsKey(key, prefix string) string {
 func (m *Monitor) handleDAGGraph(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	jobID := r.PathValue("id")
-	if !validatePathParam(w, "id", jobID) {
+	if !validateJobIDParam(w, "id", jobID) {
 		return
 	}
 

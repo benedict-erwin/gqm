@@ -1668,12 +1668,43 @@ func TestSecurity_PathParamValidation_ValidChars(t *testing.T) {
 	m, _ := testMonitor(t, Config{})
 	m.startedAt = time.Now()
 
-	// Valid path param characters: alphanumeric, hyphens, underscores, dots, colons, @
-	validIDs := []string{"job-123", "email_queue", "daily.report", "abc123", "user@host", "email:send", "app:email:send"}
+	// Valid job ID characters: alphanumeric, hyphens, underscores, dots, @.
+	//
+	// Colons used to be in this list, asserted against /api/v1/jobs/{id}. That
+	// encoded the M-05 collision as the contract: GQM joins key segments with a
+	// colon and a job owns "<prefix>job:<id>" as well as "<prefix>job:<id>:deps"
+	// and friends, so a colon in a job ID addresses another job's DAG metadata.
+	// The convention that needs colons is job types and queue names, which is
+	// what TestSecurity_PathParamValidation_ColonRules covers.
+	validIDs := []string{"job-123", "email_queue", "daily.report", "abc123", "user@host"}
 	for _, id := range validIDs {
 		w := doRequest(m, "GET", "/api/v1/jobs/"+id, "")
 		if w.Code == http.StatusBadRequest {
 			t.Errorf("valid id %q rejected as bad request", id)
+		}
+	}
+}
+
+// Colons are refused where they can collide and kept where the namespace
+// convention needs them. Splitting these apart is the point: one permissive
+// rule for both is what allowed a job ID to name another job's metadata key.
+func TestSecurity_PathParamValidation_ColonRules(t *testing.T) {
+	m, _ := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+
+	for _, id := range []string{"order-42:deps", "order-42:dependents", "email:send"} {
+		w := doRequest(m, "GET", "/api/v1/jobs/"+id, "")
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("job ID %q got %d, want 400 — colons are the key separator", id, w.Code)
+		}
+	}
+
+	// Queue names own no bare key, so no name can be spelled to reach another
+	// queue's keys. The "namespace:action" convention stays usable.
+	for _, name := range []string{"email:send", "app:email:send"} {
+		w := doRequest(m, "GET", "/api/v1/queues/"+name+"/stats", "")
+		if w.Code == http.StatusBadRequest {
+			t.Errorf("queue name %q rejected as bad request, want it accepted", name)
 		}
 	}
 }

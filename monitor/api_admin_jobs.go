@@ -16,7 +16,7 @@ func (m *Monitor) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
-	if !validatePathParam(w, "id", id) {
+	if !validateJobIDParam(w, "id", id) {
 		return
 	}
 	if err := m.admin.RetryJob(r.Context(), id); err != nil {
@@ -41,7 +41,7 @@ func (m *Monitor) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
-	if !validatePathParam(w, "id", id) {
+	if !validateJobIDParam(w, "id", id) {
 		return
 	}
 	if err := m.admin.CancelJob(r.Context(), id); err != nil {
@@ -66,7 +66,7 @@ func (m *Monitor) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
-	if !validatePathParam(w, "id", id) {
+	if !validateJobIDParam(w, "id", id) {
 		return
 	}
 	if err := m.admin.DeleteJob(r.Context(), id); err != nil {

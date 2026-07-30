@@ -159,10 +159,29 @@ const maxRequestBody = 1 << 20
 // Max 256 chars. Rejects slashes, spaces, and other special characters.
 var validPathParam = regexp.MustCompile(`^[a-zA-Z0-9._@:\-]{1,256}$`)
 
+// validJobIDParam is validPathParam without the colon. A job owns a bare key
+// and suffixed ones ("<prefix>job:<id>" alongside "<prefix>job:<id>:deps" and
+// friends), so a colon in an id can address another job's DAG metadata. The
+// library refuses to enqueue such an id; the API must not accept one either,
+// or it would offer a lookup path to keys no legitimate job can own.
+var validJobIDParam = regexp.MustCompile(`^[a-zA-Z0-9._@\-]{1,256}$`)
+
 // validatePathParam checks a path parameter value is safe to use in Redis keys.
 // Returns an empty string and writes a 400 error if invalid.
 func validatePathParam(w http.ResponseWriter, name, value string) bool {
 	if !validPathParam.MatchString(value) {
+		writeError(w, http.StatusBadRequest, name+" contains invalid characters", "BAD_REQUEST")
+		return false
+	}
+	return true
+}
+
+// validateJobIDParam is validatePathParam for job IDs, which may not contain a
+// colon. Queue, cron, worker and server IDs keep the permissive rule: none of
+// them owns both a bare key and suffixed keys, so none can be spelled to
+// collide with another resource.
+func validateJobIDParam(w http.ResponseWriter, name, value string) bool {
+	if !validJobIDParam.MatchString(value) {
 		writeError(w, http.StatusBadRequest, name+" contains invalid characters", "BAD_REQUEST")
 		return false
 	}

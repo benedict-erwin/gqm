@@ -8,24 +8,45 @@ import (
 	"strings"
 )
 
-// safeNameRe matches strings containing only safe characters for Redis key components.
-// Colons are allowed because GQM uses "namespace:action" convention for job types
-// (e.g., "email:send", "report:generate") and implicit pools derive their queue name
-// from the job type. The colon-in-key-segment concern is theoretical — key() always
-// uses fixed structural suffixes (e.g., "ready", "processing"), so a colon in the
-// value segment cannot produce a key that collides with a different resource.
+// safeNameRe matches queue names and job types. Colons are allowed here because
+// GQM uses the "namespace:action" convention for job types (e.g. "email:send")
+// and implicit pools derive their queue name from the job type.
+//
+// This is safe for queue names specifically because a queue owns no bare key:
+// every queue key carries a structural suffix ("<prefix>queue:<name>:ready" and
+// so on), and the suffix set is fixed, so no name can be spelled to land on a
+// different queue's key. Job IDs do not have that property — see safeJobIDRe.
 var safeNameRe = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
+
+// safeJobIDRe matches job IDs, which may not contain a colon.
+//
+// An earlier comment here called the colon-collision concern theoretical, on
+// the reasoning that key() always appends a fixed structural suffix. That
+// reasoning was wrong, and the collision has since been reproduced through
+// Client.Enqueue: a job owns a bare key as well as suffixed ones — the hash at
+// "<prefix>job:<id>" plus "<prefix>job:<id>:deps", ":pending_deps" and
+// ":dependents" — so a job with the id "order-42:deps" occupies exactly the key
+// that job "order-42" needs for its dependency set. The two hold different
+// Redis types, so the victim's enqueue fails with WRONGTYPE. The ":dependents"
+// variant blocks every child of the targeted parent.
+//
+// A wrong comment about a security property is worse than no comment: it stops
+// the next reader from checking.
+var safeJobIDRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // validateJobInputs checks queue name, job ID, and dependency IDs for safe characters.
 func validateJobInputs(job *Job) error {
 	if job.Queue != "" && (len(job.Queue) > 128 || !safeNameRe.MatchString(job.Queue)) {
 		return ErrInvalidQueueName
 	}
-	if len(job.ID) > 256 || !safeNameRe.MatchString(job.ID) {
+	if len(job.ID) > 256 || !safeJobIDRe.MatchString(job.ID) {
 		return ErrInvalidJobID
 	}
+	// Dependency IDs name other jobs, so they are held to the same rule. A
+	// colon here would not corrupt anything by itself, but it can only ever
+	// refer to a job that could not have been enqueued.
 	for _, depID := range job.DependsOn {
-		if depID == "" || !safeNameRe.MatchString(depID) {
+		if depID == "" || !safeJobIDRe.MatchString(depID) {
 			return ErrInvalidJobID
 		}
 	}

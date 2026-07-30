@@ -270,7 +270,7 @@ client.Enqueue("report.generate", payload,
     gqm.MaxRetry(5),                           // max retry attempts
     gqm.Timeout(2 * time.Minute),              // job-level timeout
     gqm.RetryIntervals(10, 30, 60, 300),       // custom backoff (seconds)
-    gqm.JobID("report-2026-02"),               // custom job ID (default: UUID v7)
+    gqm.JobID("report-2026-02"),               // custom job ID (no colons — see below)
     gqm.Meta(map[string]string{"user": "42"}), // arbitrary metadata
     gqm.EnqueuedBy("api-gateway"),             // audit trail
     gqm.EnqueueAtFront(true),                  // push to front of queue
@@ -281,6 +281,24 @@ client.Enqueue("report.generate", payload,
     gqm.FailureTTL(7 * 24 * time.Hour),        // retention override, failure
 )
 ```
+
+### Job ID rules
+
+A custom job ID may contain letters, digits, hyphen, underscore and dot, up to
+256 characters. **Colons are not allowed** and `Enqueue` returns
+`ErrInvalidJobID` for them.
+
+GQM builds Redis keys by joining segments with a colon, and a job owns more than
+one key — the job hash at `gqm:job:<id>`, plus its DAG metadata at
+`gqm:job:<id>:deps`, `:pending_deps` and `:dependents`. An ID like
+`order-42:deps` would land on the dependency set belonging to job `order-42`,
+and since the two hold different Redis types the other job's DAG operations
+would fail.
+
+Job types and queue names are unaffected — they own no such sub-keys, so
+`email:send` remains a perfectly good job type and queue name. If you derive job
+IDs from an external identifier that may contain a colon, replace it with a
+hyphen or underscore first.
 
 ## Job Retention
 

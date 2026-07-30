@@ -13,7 +13,7 @@ import (
 func (m *Monitor) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if !validatePathParam(w, "id", id) {
+	if !validateJobIDParam(w, "id", id) {
 		return
 	}
 

@@ -40,10 +40,19 @@ var (
 	ErrDuplicateJobID = errors.New("gqm: duplicate job ID")
 
 	// ErrInvalidQueueName is returned when a queue name contains invalid characters.
-	ErrInvalidQueueName = errors.New("gqm: invalid queue name (only alphanumeric, hyphen, underscore, dot allowed; max 128 chars)")
+	ErrInvalidQueueName = errors.New("gqm: invalid queue name (only alphanumeric, hyphen, underscore, dot, colon allowed; max 128 chars)")
 
 	// ErrInvalidJobID is returned when a job ID contains invalid characters.
-	ErrInvalidJobID = errors.New("gqm: invalid job ID (only alphanumeric, hyphen, underscore, dot allowed; max 256 chars)")
+	//
+	// Colons are excluded on purpose. GQM builds Redis keys by joining segments
+	// with a colon, and a job owns more than one key: the job hash itself at
+	// "<prefix>job:<id>", plus its DAG metadata at "<prefix>job:<id>:deps",
+	// ":pending_deps" and ":dependents". A job whose id ends in one of those
+	// suffixes therefore lands on another job's metadata key, and since the two
+	// hold different Redis types the victim's DAG operations fail with
+	// WRONGTYPE. Job types and queue names may still contain colons — they own
+	// no such sub-keys.
+	ErrInvalidJobID = errors.New("gqm: invalid job ID (only alphanumeric, hyphen, underscore, dot allowed; colons are reserved as GQM's Redis key separator; max 256 chars)")
 
 	// ErrSkipRetry can be returned (or wrapped) by a handler to skip all
 	// remaining retries and move the job directly to the dead letter queue.
