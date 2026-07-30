@@ -1,6 +1,14 @@
 # GQM Dev Server — YAML Config Variant
 # Same features as the programmatic variant, but pools/queues/cron/auth defined in YAML.
 # Demonstrates multi-queue pools, varied dequeue strategies, and different retry policies.
+#
+# BEFORE THIS WILL START: generate a password hash and paste it into
+# monitoring.auth.users[0].password_hash below.
+#
+#     gqm hash-password
+#
+# The committed placeholder is not a valid bcrypt hash, so config validation
+# rejects it. That is on purpose — see the comment at the field.
 
 redis:
     addr: GQM_TEST_REDIS_ADDR
@@ -139,8 +147,13 @@ monitoring:
         session_ttl: 86400
         users:
             - username: admin
-              # password: admin (generate with: gqm hash-password)
-              password_hash: "$2a$10$JMGzdO8nfrjtHkxyw5ZvUOuwCgnM324XNYO5SZmDswlu8FEakdPtC"
+              # Generate your own before this will start:
+              #   gqm hash-password
+              # and paste the result here. This placeholder is not a bcrypt
+              # hash, so the server refuses to start until you replace it —
+              # that is deliberate. A working hash committed here would be a
+              # publicly known admin password for anyone who copied this file.
+              password_hash: "CHANGE-ME-RUN-gqm-hash-password"
               role: admin
     api:
         api_keys:

@@ -48,6 +48,7 @@
 
 set -uo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REDIS_ADDR="${GQM_TEST_REDIS_ADDR:-redis:6379}"
 PORT="${VERIFY_PORT:-18099}"
 WORK="$(mktemp -d)"
@@ -485,6 +486,69 @@ else
 fi
 
 # ===========================================================================
+head_ "L-01  gqm init must not leave credentials world-readable"
+# ===========================================================================
+# The config file is where credentials live, and an API key has to sit there in
+# the clear because matchAPIKey compares the raw value. saveConfigNode preserves
+# the mode it finds, so a permissive mode at creation would survive every later
+# set-password and add-api-key.
+
+CLIDIR="$WORK/cli"
+mkdir -p "$CLIDIR"
+if go build -buildvcs=false -o "$CLIDIR/gqm" ./cmd/gqm 2>>"$WORK/build.err"; then
+  ( cd "$CLIDIR" && ./gqm init >/dev/null 2>&1 )
+  cfg=$(ls "$CLIDIR"/*.yaml 2>/dev/null | head -1)
+  if [[ -n "$cfg" ]]; then
+    mode=$(stat -c '%a' "$cfg")
+    [[ "$mode" == "600" ]] && ok "gqm init writes the config as 0600" \
+                           || bad "gqm init writes the config as 0600" "600" "$mode"
+
+    # And a file that is already permissive gets tightened when a credential is
+    # written into it, with the change announced rather than done silently.
+    chmod 0644 "$cfg"
+    out=$( cd "$CLIDIR" && ./gqm add-api-key --config gqm.yaml --name verify --role viewer 2>&1 )
+    mode=$(stat -c '%a' "$cfg")
+    [[ "$mode" == "600" ]] && ok "writing a credential tightens a 0644 config to 0600" \
+                           || bad "writing a credential tightens a 0644 config" "600" "$mode"
+    grep -qi "tightening to 0600" <<<"$out" \
+      && ok "the permission change is reported, not silent" \
+      || bad "the permission change is reported" "a message about tightening to 0600" "$(head -c 160 <<<"$out")"
+  else
+    bad "gqm init produces a config" "a .yaml file in the working directory" "none found"
+  fi
+else
+  bad "gqm CLI builds" "a successful build" "$(tail -3 "$WORK/build.err")"
+fi
+
+# ===========================================================================
+head_ "L-02  No usable credential may be committed in the examples"
+# ===========================================================================
+# A config example copied to production hands over a publicly known admin
+# password. The placeholder is fail-closed rather than merely commented: config
+# validation requires a bcrypt prefix, so the server refuses to start.
+
+if grep -rlE '\$2[aby]?\$[0-9]+\$' _examples/ >/dev/null 2>&1; then
+  bad "no bcrypt hash remains in _examples" "no committed hashes" \
+      "$(grep -rlE '\$2[aby]?\$[0-9]+\$' _examples/ | tr '\n' ' ')"
+else
+  ok "no bcrypt hash remains in _examples"
+fi
+
+EX_CFG="_examples/09-dev-server/config/gqm.yaml"
+if [[ -f "$REPO_ROOT/$EX_CFG" ]]; then
+  # Bounded: if the placeholder were ever replaced with something valid, this
+  # would start a real server and block forever rather than failing.
+  cfgout=$(timeout 15 "$WORK/harness/server" "$REPO_ROOT/$EX_CFG" 2>&1)
+  if grep -q "CONFIG_REJECTED" <<<"$cfgout" && grep -qi "bcrypt" <<<"$cfgout"; then
+    ok "the example config refuses to start until the hash is replaced"
+  else
+    bad "the example config fails closed" "CONFIG_REJECTED mentioning bcrypt" "$(head -c 200 <<<"$cfgout")"
+  fi
+else
+  bad "the example config exists" "$EX_CFG" "not found"
+fi
+
+# ===========================================================================
 head_ "L-03/L-04/L-05  Body content type, query validation, response headers"
 # ===========================================================================
 # These ride on one server. The header checks in particular must run over a real
@@ -648,7 +712,6 @@ head_ "M-02  Committed compose files must not publish Redis on every interface"
 # local network. This is a static check of the committed files: the running
 # container keeps whatever binding it was created with until it is recreated.
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for f in docker-compose.yml .devcontainer/docker-compose.yml; do
   path="$REPO_ROOT/$f"
   if [[ ! -f "$path" ]]; then

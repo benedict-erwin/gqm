@@ -32,13 +32,21 @@ func TestInitConfig_Create(t *testing.T) {
 		t.Error("config missing monitoring section")
 	}
 
-	// Verify file permissions.
+	// The config file is where credentials go: the template carries
+	// password_hash and api_keys placeholders, and an API key must be stored in
+	// the clear because matchAPIKey compares the raw value. This used to assert
+	// 0644, which made a world-readable credential file the documented
+	// behaviour rather than an oversight — and saveConfigNode preserves the
+	// mode it finds, so that would have survived every later set-password.
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o644 {
-		t.Errorf("file permission = %o, want 644", perm)
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file permission = %o, want 600", perm)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("file permission %o is readable by group or other", perm)
 	}
 }
 

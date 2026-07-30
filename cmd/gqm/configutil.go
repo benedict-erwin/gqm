@@ -38,14 +38,34 @@ func saveConfigNode(path string, doc *yaml.Node) error {
 		return fmt.Errorf("marshaling config yaml: %w", err)
 	}
 
-	// Preserve original file permissions.
+	// Preserve original file permissions, but never keep a mode that exposes
+	// credentials. This function is how set-password and add-api-key write, so
+	// the file is about to hold a bcrypt hash or a plaintext API key. Preserving
+	// the mode is right in general — it must not widen what the operator chose —
+	// yet a config created before this was fixed, or copied from somewhere
+	// permissive, would otherwise stay group- or world-readable forever.
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("stat config file: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, info.Mode().Perm()); err != nil {
+	mode := info.Mode().Perm()
+	if mode&0o077 != 0 {
+		// Say so. Silently changing permissions under an operator is its own
+		// kind of surprise.
+		fmt.Fprintf(os.Stderr,
+			"gqm: %s was mode %04o, which lets other local users read the credentials in it; tightening to 0600\n",
+			path, mode)
+		mode = 0o600
+	}
+
+	if err := os.WriteFile(path, data, mode); err != nil {
 		return fmt.Errorf("writing config file: %w", err)
+	}
+	// WriteFile only applies the mode when it creates the file, so an existing
+	// file needs an explicit chmod.
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("tightening config file permissions: %w", err)
 	}
 
 	return nil

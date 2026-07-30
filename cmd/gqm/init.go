@@ -96,7 +96,13 @@ func initConfig(configPath string) error {
 		return fmt.Errorf("%s already exists (will not overwrite)", configPath)
 	}
 
-	if err := os.WriteFile(configPath, []byte(configTemplate), 0o644); err != nil {
+	// 0600, not 0644: this file is where credentials go. The template carries
+	// password_hash and api_keys placeholders with instructions to paste real
+	// values in, and an API key has to be stored in the clear because
+	// matchAPIKey compares the raw value. saveConfigNode preserves whatever
+	// mode it finds, so a world-readable file created here would stay
+	// world-readable through every later set-password and add-api-key.
+	if err := os.WriteFile(configPath, []byte(configTemplate), 0o600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 
