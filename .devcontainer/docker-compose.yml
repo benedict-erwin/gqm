@@ -11,8 +11,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Loopback only — see the note in the root docker-compose.yml. The dev
+    # container reaches Redis over the compose network as redis:6379 and is
+    # unaffected; this mapping exists solely for tools running on the host.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes

@@ -57,6 +57,30 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 - Go 1.22+
 - Redis 6.2+ (for `BLMOVE`)
 
+### Securing Redis
+
+**In production, Redis must require a password (or use ACLs) and should use TLS.**
+
+Redis is not just the queue backend. It also holds dashboard session tokens under
+`gqm:session:<token>` and every job payload. Anyone who can read the keyspace can
+lift a session token and use it as a cookie, which bypasses the login page rather
+than defeating it — no password guessing involved. Anyone who can write to it can
+inject jobs your workers will execute, or `FLUSHALL` every queue.
+
+```yaml
+redis:
+  addr: "redis.internal:6379"
+  password: "${REDIS_PASSWORD}"   # requirepass, or a Redis ACL user
+  tls: true                        # encrypt the connection
+```
+
+GQM prints a loud startup banner when it connects to a password-less Redis. It
+still starts — the local development case is legitimate — but the warning goes to
+stderr rather than the logger, so `log_level` cannot silence it.
+
+The bundled `docker-compose.yml` is for local development only: it publishes
+Redis on `127.0.0.1` and sets no password. Do not deploy it as-is.
+
 ## Installation
 
 ```bash
