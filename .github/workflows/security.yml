@@ -1,0 +1,152 @@
+name: Security
+
+# Actions are pinned to commit SHAs rather than tags. A tag is a movable
+# pointer: whoever controls the action repository can repoint @v7 at new code,
+# and every workflow using it runs that code on the next push. A SHA cannot be
+# repointed. The trailing comment records which release each SHA was, so the
+# pin stays readable when it comes time to bump.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly. Catches newly published advisories against unchanged code, which
+    # is the case a push-triggered scan never sees.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+# Least privilege, stated explicitly. The default token for a workflow without
+# this block is far broader than a test run needs.
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: vet, race, vulnerabilities
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      GQM_TEST_REDIS_ADDR: localhost:6379
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^vendor/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt reports unformatted files"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go test -race
+        run: |
+          set -o pipefail
+          go test -race -v ./... -count=1 -timeout 900s 2>&1 | tee test.log
+
+      # A suite that skips is not a suite that passed. When Redis was
+      # unreachable in local development, every Redis-backed test skipped and
+      # `go test` still reported ok — a gate that only reads the exit code would
+      # have called that a green build. These are the exact skip messages the
+      # test helpers emit when they cannot reach Redis.
+      - name: fail on silently skipped Redis tests
+        if: always()
+        run: |
+          if grep -qE "Redis not available|requires Redis" test.log; then
+            echo "::error::Redis-backed tests skipped — the suite reported success without exercising Redis"
+            grep -nE "Redis not available|requires Redis" test.log | head -20
+            exit 1
+          fi
+          passed=$(grep -c '^--- PASS' test.log || true)
+          echo "tests passed: $passed"
+          # A floor, not an exact count: it must not need editing for every new
+          # test, but it must notice if a whole category stops running.
+          if [ "$passed" -lt 600 ]; then
+            echo "::error::only $passed tests passed; expected at least 600 — something is not running"
+            exit 1
+          fi
+
+      # The TUI is a separate Go module, so "go test ./..." at the repository
+      # root never reaches it — the workspace affects resolution, not which
+      # packages the pattern matches. Its tests would otherwise go unrun.
+      - name: go test tui module
+        working-directory: tui
+        run: go test -race ./... -count=1 -timeout 300s
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          # Exits non-zero only for vulnerabilities this code actually calls.
+          # Unreachable advisories in required modules are reported and do not
+          # fail the build — GO-2026-5932 (x/crypto/openpgp) has no fix and is
+          # not importable here, so failing on it would train people to ignore
+          # this step.
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  stress:
+    name: stress suite
+    # Roughly three minutes of sustained load, so it runs on a schedule and on
+    # demand rather than on every push.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      GQM_TEST_REDIS_ADDR: localhost:6379
+      GQM_STRESS_TEST: "1"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test -race with stress
+        run: |
+          set -o pipefail
+          go test -race -v ./... -count=1 -timeout 1800s 2>&1 | tee stress.log
+
+      - name: fail on silently skipped Redis tests
+        if: always()
+        run: |
+          if grep -qE "Redis not available|requires Redis" stress.log; then
+            echo "::error::Redis-backed tests skipped during the stress run"
+            exit 1
+          fi
+          if grep -q "set GQM_STRESS_TEST=1" stress.log; then
+            echo "::error::stress tests skipped even though GQM_STRESS_TEST=1 was set"
+            exit 1
+          fi
