@@ -166,6 +166,15 @@ func (m *Monitor) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Login takes no cookie, so SameSite offers nothing here, and the
+	// Set-Cookie on the response is still stored by the browser — SameSite
+	// governs sending, not setting. Insisting on a JSON content type is what
+	// stops a cross-site form from silently logging a victim into the
+	// attacker's session.
+	if !requireJSON(w, r) {
+		return
+	}
+
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`

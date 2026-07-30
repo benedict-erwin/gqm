@@ -98,6 +98,10 @@ func (m *Monitor) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !requireJSON(w, r) {
+		return
+	}
+
 	var req batchRequest
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -149,6 +153,10 @@ func (m *Monitor) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 func (m *Monitor) handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 	if m.admin == nil {
 		writeError(w, http.StatusNotImplemented, "admin operations not available", "NOT_IMPLEMENTED")
+		return
+	}
+
+	if !requireJSON(w, r) {
 		return
 	}
 

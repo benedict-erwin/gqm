@@ -81,7 +81,19 @@ func (m *Monitor) handleStats(w http.ResponseWriter, r *http.Request) {
 // handleStatsDaily returns daily processed/failed counts per queue.
 func (m *Monitor) handleStatsDaily(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// This value is concatenated into a Redis key name below. It was the only
+	// caller-supplied string reaching a key without validation — every
+	// r.PathValue() site is checked, this query parameter was not. The fixed
+	// ":processed:<date>" suffix means no other resource is reachable, but the
+	// length was unbounded: one request fans out to as many as 180 GETs, so a
+	// key name of a few hundred kilobytes is an amplifier.
+	//
+	// The permissive rule is the right one here: this names a queue, and queue
+	// names legitimately contain colons.
 	queueFilter := r.URL.Query().Get("queue")
+	if queueFilter != "" && !validatePathParam(w, "queue", queueFilter) {
+		return
+	}
 	days := queryInt(r, "days", 30)
 	if days < 1 {
 		days = 1

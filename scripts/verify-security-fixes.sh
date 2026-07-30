@@ -485,6 +485,63 @@ else
 fi
 
 # ===========================================================================
+head_ "L-03/L-04/L-05  Body content type, query validation, response headers"
+# ===========================================================================
+# These ride on one server. The header checks in particular must run over a real
+# listener: securityHeaders wraps the mux, so a handler-level test asserts on
+# headers it never sees.
+
+write_config "$WORK/hardening.yaml" "127.0.0.1:$PORT" ""
+if start_server "$WORK/hardening.yaml"; then
+  # L-03 — a cross-site form can only send these content types, and
+  # json.Decoder would otherwise accept the body they produce.
+  for ct in "text/plain" "application/x-www-form-urlencoded" "multipart/form-data; boundary=x"; do
+    c=$(code -X POST -H "Content-Type: $ct" \
+          --data '{"job_ids":["a"]}' -H 'X-GQM-CSRF: 1' \
+          "http://127.0.0.1:$PORT/api/v1/jobs/batch/retry")
+    [[ "$c" == "415" ]] && ok "body endpoint refuses Content-Type $ct (415)" \
+                        || bad "body endpoint refuses Content-Type $ct" "415" "$c"
+  done
+  c=$(code -X POST -H 'Content-Type: application/json; charset=utf-8' \
+        --data '{"job_ids":["a"]}' -H 'X-GQM-CSRF: 1' \
+        "http://127.0.0.1:$PORT/api/v1/jobs/batch/retry")
+  [[ "$c" != "415" ]] && ok "JSON with a charset parameter still accepted (got $c)" \
+                      || bad "JSON with a charset parameter still accepted" "anything but 415" "$c"
+
+  # L-04 — the only caller-supplied string that reached a Redis key name.
+  c=$(code "http://127.0.0.1:$PORT/api/v1/stats/daily?queue=has%20space")
+  [[ "$c" == "400" ]] && ok "stats queue filter rejects invalid characters (400)" \
+                      || bad "stats queue filter rejects invalid characters" "400" "$c"
+  long=$(printf 'a%.0s' $(seq 1 300))
+  c=$(code "http://127.0.0.1:$PORT/api/v1/stats/daily?queue=$long")
+  [[ "$c" == "400" ]] && ok "stats queue filter rejects an over-long name (400)" \
+                      || bad "stats queue filter rejects an over-long name" "400" "$c"
+  c=$(code "http://127.0.0.1:$PORT/api/v1/stats/daily?queue=email:send")
+  [[ "$c" == "200" ]] && ok "stats queue filter still accepts a colon queue name" \
+                      || bad "stats queue filter accepts a colon queue name" "200" "$c"
+
+  # L-05 — headers, read off a real response.
+  hdr=$(curl -s -D - -o /dev/null "http://127.0.0.1:$PORT/api/v1/queues")
+  for want in "referrer-policy: no-referrer" "cross-origin-opener-policy: same-origin" "permissions-policy:"; do
+    grep -qi "^$want" <<<"$hdr" && ok "response carries ${want%%:*}" \
+                                || bad "response carries ${want%%:*}" "$want" "absent"
+  done
+  # default-src is not a fallback for these, which is why their absence was the
+  # substantive part of the finding.
+  csp=$(grep -i '^content-security-policy:' <<<"$hdr")
+  for d in "base-uri 'none'" "form-action 'self'" "frame-ancestors 'none'" "object-src 'none'"; do
+    grep -qF "$d" <<<"$csp" && ok "CSP includes $d" \
+                            || bad "CSP includes $d" "$d" "$(head -c 160 <<<"$csp")"
+  done
+  grep -qi '^cache-control: no-store' <<<"$hdr" \
+    && ok "API response is marked no-store" \
+    || bad "API response is marked no-store" "cache-control: no-store" "$(grep -i '^cache-control' <<<"$hdr" || echo absent)"
+  stop_server
+else
+  bad "hardening server starts" "server starts" "refused: $(head -c 200 "$WORK/err.log")"
+fi
+
+# ===========================================================================
 head_ "M-05  A job ID must not be able to occupy another job's DAG metadata key"
 # ===========================================================================
 # GQM joins Redis key segments with a colon, and a job owns a bare key as well

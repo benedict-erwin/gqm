@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"encoding/json"
+	"mime"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -165,6 +166,27 @@ var validPathParam = regexp.MustCompile(`^[a-zA-Z0-9._@:\-]{1,256}$`)
 // library refuses to enqueue such an id; the API must not accept one either,
 // or it would offer a lookup path to keys no legitimate job can own.
 var validJobIDParam = regexp.MustCompile(`^[a-zA-Z0-9._@\-]{1,256}$`)
+
+// requireJSON rejects a request whose body is not declared as JSON.
+//
+// This is a CSRF control, not a content-negotiation nicety. A cross-site HTML
+// form can only send text/plain, application/x-www-form-urlencoded or
+// multipart/form-data, and json.Decoder stops after the first JSON value — so a
+// form with a carefully named field produces a body the decoder accepts. Any
+// endpoint that parses a body must therefore insist on a content type no form
+// can produce.
+//
+// The charset parameter is parsed off rather than string-compared, so
+// "application/json; charset=utf-8" is still accepted.
+func requireJSON(w http.ResponseWriter, r *http.Request) bool {
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mt != "application/json" {
+		writeError(w, http.StatusUnsupportedMediaType,
+			"Content-Type must be application/json", "UNSUPPORTED_MEDIA_TYPE")
+		return false
+	}
+	return true
+}
 
 // validatePathParam checks a path parameter value is safe to use in Redis keys.
 // Returns an empty string and writes a 400 error if invalid.

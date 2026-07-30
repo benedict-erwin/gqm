@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -149,12 +150,47 @@ func (m *Monitor) requestLogger(next http.Handler) http.Handler {
 }
 
 // securityHeaders adds standard security headers to all responses.
+//
+// base-uri is the substantive addition here, and it is easy to overlook because
+// default-src does not act as a fallback for it. Every asset reference in
+// index.html is relative ("css/style.css", "js/app.js", "vendor/*.js"), so an
+// injected <base href> would repoint all of them at once — turning an HTML
+// injection that the rest of the policy contains into script hijacking.
+// form-action and frame-ancestors are likewise not covered by default-src.
+//
+// style-src still allows 'unsafe-inline'. Removing it needs the dashboard CSS
+// refactored, which is deliberately not bundled into this change.
 func (m *Monitor) securityHeaders(next http.Handler) http.Handler {
+	const csp = "default-src 'self'; " +
+		"script-src 'self'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data:; " +
+		"font-src 'self'; " +
+		"connect-src 'self'; " +
+		"object-src 'none'; " +
+		"base-uri 'none'; " +
+		"form-action 'self'; " +
+		"frame-ancestors 'none'"
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		h := w.Header()
+		h.Set("Content-Security-Policy", csp)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+
+		// API and auth responses carry job payloads and session identity, which
+		// must not sit in a browser or proxy cache and outlive a logout on a
+		// shared workstation. Static dashboard assets are deliberately left
+		// cacheable — caching those costs nothing and helps.
+		if p := r.URL.Path; strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/auth/") {
+			h.Set("Cache-Control", "no-store")
+			h.Set("Pragma", "no-cache")
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
