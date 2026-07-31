@@ -21,23 +21,14 @@ app:
     shutdown_timeout: 30
 queues:
     - name: email:send
-      priority: 5
     - name: report:generate
-      priority: 3
     - name: notification:push
-      priority: 7
     - name: image:resize
-      priority: 1
     - name: data:export
-      priority: 3
     - name: invoice:generate
-      priority: 5
     - name: payment:process
-      priority: 8
     - name: shipping:schedule
-      priority: 4
     - name: analytics:aggregate
-      priority: 2
 pools:
     # Fast pool — high concurrency, strict priority (notification > email)
     - name: comms-pool

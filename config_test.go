@@ -27,9 +27,7 @@ app:
 
 queues:
   - name: critical
-    priority: 10
   - name: default
-    priority: 1
 
 pools:
   - name: email-pool
@@ -105,7 +103,7 @@ scheduler:
 	if len(cfg.Queues) != 2 {
 		t.Fatalf("queues count = %d, want 2", len(cfg.Queues))
 	}
-	if cfg.Queues[0].Name != "critical" || cfg.Queues[0].Priority != 10 {
+	if cfg.Queues[0].Name != "critical" {
 		t.Errorf("queues[0] = %+v", cfg.Queues[0])
 	}
 

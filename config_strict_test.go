@@ -104,9 +104,7 @@ app:
   failure_ttl: 2592000
 queues:
   - name: "critical"
-    priority: 10
   - name: "default"
-    priority: 1
 pools:
   - name: "fast"
     job_types: ["email.send"]

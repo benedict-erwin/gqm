@@ -9,6 +9,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Upgrading
 
+**`queues[].priority` has been removed.** It was parsed and never read by
+anything, so setting it never had an effect. Priority comes from the order of
+`pools[].queues`, combined with `dequeue_strategy`. Delete the field — with
+unknown keys now rejected, a config still carrying it will refuse to start.
+
+**A pool may only listen on queues declared under `queues:`.** Naming an
+undeclared queue used to be accepted, which meant a typo produced a pool that
+started, held its workers, and polled a queue nothing ever wrote to — no error,
+no log, a healthy-looking pool doing nothing. `default` is exempt and never
+needs declaring.
+
 **Unknown keys in `gqm.yaml` are now an error.** They used to be dropped in
 silence, which made a typo close to undetectable: the field kept its zero value,
 the zero value resolved to a default, and the server came up running numbers
@@ -32,7 +43,11 @@ corrected.
 - **Connection pool sizing** — README now says plainly not to size the pool to the worker count, with the measurement behind it: 100 workers and instant handlers push ~33,100 jobs/sec on a 4-core container whether the pool is the default 40 or an explicit 100, with no `ErrPoolTimeout` either way. Workers hold a connection for one command, not while waiting, and Redis executes commands one at a time — so past the point where Redis is kept busy, more connections buy nothing. The cases that do call for raising it are slow commands, not many workers
 - **DAG chain latency under a burst** — README explains that a resolved dependent is pushed to the back of its queue like any other job, so enqueuing thousands of chains at once puts every first stage ahead of every second stage. The wait that follows reads as slow DAG resolution and is really queue depth: measured across the same code, the gap between stage one and stage two went from 22ms at 300 chains to eight seconds at 4,000. Includes the two ways to avoid it and why the default is not changed
 
+### Removed
+- **`queues[].priority`** — parsed, never read, never affected dispatch. Priority is the order of `pools[].queues`, which is also more expressive than a single number per queue: two pools can rank the same queues differently. A field that looks like it works is worse than no field
+
 ### Fixed
+- **A pool listening on an undeclared queue is now a config error** — the `queues:` block and `pools[].queues` were never checked against each other, so a mistyped queue name gave a pool that ran, held workers, and polled an empty queue forever without a word. `default` stays exempt, since it is the fallback for jobs with no queue and for pools that declare none
 - **Mistyped config keys are no longer ignored** — `LoadConfig` now decodes with `KnownFields`, so a key outside the schema fails with the field name and line instead of being dropped. Every optional field has a sensible fallback, which is exactly what made this dangerous: a typo did not stop the server, it started one configured differently from what was written. Found a real instance immediately — the bundled dev-server example set `monitoring.enabled` and `monitoring.addr`, neither of which exists
 - **A dependent enqueued after its parent finished is no longer orphaned** — dependency resolution was driven entirely by the parent: on reaching a terminal state it read its `:dependents` set, promoted what it found, and deleted the set. A job enqueued after that moment was invisible to it and sat in `deferred` forever, with no error, no log and no dead-letter entry. Enqueuing a parent and then the work that depends on it is the ordinary way to build a chain, and the window widens the faster the parent runs — so this got *more* likely as a system got healthier. All three terminal states were affected: a completed parent left the child stuck, and a dead-lettered or canceled parent left it stuck rather than cancelling it, including when `AllowFailure` should have released it. `Enqueue` now checks parent status and runs the same resolution the worker would have; the existing `deferred` guard in the Lua makes doing it twice a no-op
 

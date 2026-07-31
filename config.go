@@ -56,10 +56,15 @@ type AppConfig struct {
 	FailureTTL *int `yaml:"failure_ttl"` // seconds, default 2592000 (30 days)
 }
 
-// QueueDef declares a named queue with optional priority metadata.
+// QueueDef declares a queue that pools are allowed to listen on.
+//
+// There is no priority field. Priority is expressed by the order of a pool's
+// queues list, combined with its dequeue strategy, which lets two pools rank
+// the same queues differently — something a single number per queue could not
+// express. A priority field existed here once, was never read by anything, and
+// was removed rather than left looking meaningful.
 type QueueDef struct {
-	Name     string `yaml:"name"`
-	Priority int    `yaml:"priority"`
+	Name string `yaml:"name"`
 }
 
 // PoolYAML holds worker pool configuration from YAML.
@@ -258,6 +263,10 @@ func (c *Config) validate() error {
 		}
 		queueNames[q.Name] = true
 	}
+	// "default" is where a job with no Queue() lands, and what a pool falls
+	// back to when it lists none. Requiring it to be spelled out would put a
+	// line that says nothing into every minimal config.
+	queueNames["default"] = true
 
 	// Pools
 	poolNames := make(map[string]bool, len(c.Pools))
@@ -274,6 +283,16 @@ func (c *Config) validate() error {
 
 		if len(p.JobTypes) == 0 {
 			return fmt.Errorf("pools[%d] %q: job_types must have at least one entry", i, p.Name)
+		}
+
+		// A pool may only listen on queues that were declared. Without this a
+		// typo produces a pool that starts, holds its workers, and polls a
+		// queue nothing ever writes to — no error, no log, and a dashboard
+		// showing a healthy pool doing nothing.
+		for qi, q := range p.Queues {
+			if !queueNames[q] {
+				return fmt.Errorf("pools[%d] %q: queues[%d] %q is not declared under queues:", i, p.Name, qi, q)
+			}
 		}
 
 		// Check catch-all

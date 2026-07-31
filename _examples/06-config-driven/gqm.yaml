@@ -14,11 +14,8 @@ app:
 
 queues:
   - name: email:high
-    priority: 10
   - name: email:low
-    priority: 1
   - name: report:generate
-    priority: 5
 
 pools:
   - name: email-pool

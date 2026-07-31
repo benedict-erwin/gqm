@@ -31,11 +31,8 @@ app:
 # Queue definitions
 queues:
   - name: "default"
-    priority: 1
   # - name: "critical"
-  #   priority: 10
   # - name: "low"
-  #   priority: 0
 
 # Worker pool configuration
 pools:

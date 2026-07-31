@@ -251,11 +251,8 @@ app:
 
 queues:
   - name: "critical"
-    priority: 10
   - name: "default"
-    priority: 1
   - name: "low"
-    priority: 0
 
 pools:
   - name: "fast"
@@ -359,16 +356,23 @@ goroutines. Each worker handles one job at a time, so the pool runs at most
 [Connection pool sizing](#connection-pool-sizing) — it is not the same as the
 Redis pool, and does not need to match it.
 
-### Priority: it comes from queue order, not `queues.priority`
+### Priority comes from queue order
 
-> **`queues.priority` is currently not read by anything.** It is parsed and
-> ignored. Setting `priority: 10` has no effect today. It is kept for
-> compatibility, and the example above shows it only because it has been there
-> since the first release.
+There is no priority field on a queue. There was one once; nothing ever read it,
+and a number that looks like it works is worse than no number at all, so it was
+removed.
 
 Priority is expressed by the **order of `pools.queues`**, combined with
 `dequeue_strategy`. In `queues: ["critical", "default", "low"]`, `critical` is
 position 0 and therefore the highest priority.
+
+Because the order lives on the pool rather than the queue, two pools can rank
+the same queues differently — something a single number per queue could not
+express.
+
+The names carry no meaning. `critical`, `default` and `low` are just labels; `q1`,
+`q2`, `q3` would behave identically. Only position matters. (`default` is the one
+exception, and only as the fallback queue name, not as a rank.)
 
 ### `dequeue_strategy`
 
@@ -415,10 +419,14 @@ applies where neither of the others is set.
 | Key | Type | Notes |
 |---|---|---|
 | `name` | string | Max 128 chars. Colons are allowed (`email:send`). Must be unique. |
-| `priority` | int | **Not currently read.** See above. |
 
-Declaring queues here is optional — a queue is created on first use. The list is
-mainly documentation of the queues a deployment expects.
+**A pool may only listen on queues declared here.** Naming an undeclared queue in
+`pools[].queues` is a config error, which is what catches a typo: a pool pointed
+at a queue nothing writes to would otherwise start, hold its workers, and poll an
+empty queue forever without a word.
+
+`default` is the exception and never needs declaring — it is where a job with no
+`Queue()` lands, and what a pool falls back to when it lists no queues.
 
 ### `pools`
 
