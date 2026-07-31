@@ -200,6 +200,10 @@ redis:
   password: ""
   db: 0
   prefix: "gqm"
+  # pool_size: 0                  # max connections; 0 = go-redis default
+                                  # (10 x GOMAXPROCS). Rarely needs changing —
+                                  # workers hold a connection only for the
+                                  # duration of one command, not while waiting.
 
 app:
   timezone: "Asia/Jakarta"

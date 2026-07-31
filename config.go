@@ -29,7 +29,8 @@ type RedisYAML struct {
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
 	Prefix   string `yaml:"prefix"`
-	TLS      bool   `yaml:"tls"` // enable TLS with system CA pool
+	TLS      bool   `yaml:"tls"`       // enable TLS with system CA pool
+	PoolSize int    `yaml:"pool_size"` // max connections; 0 = go-redis default (10*GOMAXPROCS)
 }
 
 // AppConfig holds application-level settings from YAML.
@@ -210,6 +211,10 @@ func (c *Config) validate() error {
 	}
 	// -1 is the "retain permanently" sentinel; anything below it is a typo, not
 	// a policy, so reject it rather than silently treating it as permanent.
+	if c.Redis.PoolSize < 0 {
+		return fmt.Errorf("redis.pool_size must be >= 0 (0 = go-redis default)")
+	}
+
 	if c.App.ResultTTL != nil && *c.App.ResultTTL < -1 {
 		return fmt.Errorf("app.result_ttl must be >= -1 (-1 = permanent, 0 = delete immediately)")
 	}
@@ -558,6 +563,9 @@ func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 	}
 	if cfg.Redis.DB != 0 {
 		redisOpts = append(redisOpts, WithRedisDB(cfg.Redis.DB))
+	}
+	if cfg.Redis.PoolSize != 0 {
+		redisOpts = append(redisOpts, WithRedisPoolSize(cfg.Redis.PoolSize))
 	}
 	if cfg.Redis.Prefix != "" {
 		redisOpts = append(redisOpts, WithPrefix(cfg.Redis.Prefix))
