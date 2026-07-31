@@ -8,7 +8,10 @@ name: Security
 
 on:
   push:
-    branches: [main]
+    # develop is where work lands day to day, so it has to be gated there.
+    # Running only on main would mean every change is unchecked until the
+    # release merge — the last possible moment to find out.
+    branches: [main, develop]
   pull_request:
   schedule:
     # Weekly. Catches newly published advisories against unchanged code, which
