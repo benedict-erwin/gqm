@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Upgrading
+
+**Unknown keys in `gqm.yaml` are now an error.** They used to be dropped in
+silence, which made a typo close to undetectable: the field kept its zero value,
+the zero value resolved to a default, and the server came up running numbers
+nobody chose. `concurency: 10` gave the pool `runtime.NumCPU()` workers with
+nothing in the log to say so. A mistyped `cookie_secure` left the session cookie
+without `Secure` behind a TLS proxy.
+
+If your config carries a key GQM does not recognise — a typo, or a leftover from
+an older version — the server will now refuse to start and name the field and
+line. Load it once and fix what it reports.
+
+One known case: `monitoring.enabled` and `monitoring.addr` were never real
+settings, and the bundled `09-dev-server` example used them. The real fields are
+`monitoring.api.enabled` and `monitoring.api.addr`; the example has been
+corrected.
+
 ### Added
 - **`WithRedisPoolSize()` and `redis.pool_size`** — the Redis connection pool size was not reachable through GQM's own API: the client was built with `Addr`, `Password`, `DB` and `TLSConfig` and nothing else, so changing it meant constructing a `*redis.Client` by hand and injecting it. Unset still leaves go-redis to its default of `10 x GOMAXPROCS`, which is derived from CPU count and so ignores how many pools and workers are actually configured. Raising it is not like adding workers: a connection is a socket, not a process, so it costs nothing while idle — the real ceilings are the server's `maxclients`, the open-file limit, and buffer memory
 
@@ -15,6 +33,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **DAG chain latency under a burst** — README explains that a resolved dependent is pushed to the back of its queue like any other job, so enqueuing thousands of chains at once puts every first stage ahead of every second stage. The wait that follows reads as slow DAG resolution and is really queue depth: measured across the same code, the gap between stage one and stage two went from 22ms at 300 chains to eight seconds at 4,000. Includes the two ways to avoid it and why the default is not changed
 
 ### Fixed
+- **Mistyped config keys are no longer ignored** — `LoadConfig` now decodes with `KnownFields`, so a key outside the schema fails with the field name and line instead of being dropped. Every optional field has a sensible fallback, which is exactly what made this dangerous: a typo did not stop the server, it started one configured differently from what was written. Found a real instance immediately — the bundled dev-server example set `monitoring.enabled` and `monitoring.addr`, neither of which exists
 - **A dependent enqueued after its parent finished is no longer orphaned** — dependency resolution was driven entirely by the parent: on reaching a terminal state it read its `:dependents` set, promoted what it found, and deleted the set. A job enqueued after that moment was invisible to it and sat in `deferred` forever, with no error, no log and no dead-letter entry. Enqueuing a parent and then the work that depends on it is the ordinary way to build a chain, and the window widens the faster the parent runs — so this got *more* likely as a system got healthier. All three terminal states were affected: a completed parent left the child stuck, and a dead-lettered or canceled parent left it stuck rather than cancelling it, including when `AllowFailure` should have released it. `Enqueue` now checks parent status and runs the same resolution the worker would have; the existing `deferred` guard in the Lua makes doing it twice a no-op
 
 ## [0.2.0] — 2026-07-31

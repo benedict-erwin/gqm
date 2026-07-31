@@ -138,8 +138,6 @@ scheduler:
           max_retry: 1
           enabled: false
 monitoring:
-    enabled: true
-    addr: ":8080"
     dashboard:
         enabled: true
     auth:
@@ -156,6 +154,8 @@ monitoring:
               password_hash: "CHANGE-ME-RUN-gqm-hash-password"
               role: admin
     api:
+        enabled: true
+        addr: ":8080"
         api_keys:
             - name: dev-key
               key: "gqm_ak_dev_server_config_key_for_testing_only"

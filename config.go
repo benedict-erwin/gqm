@@ -1,9 +1,12 @@
 package gqm
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"runtime"
@@ -161,8 +164,27 @@ type DashboardConfig struct {
 // LoadConfig parses YAML bytes and validates the resulting configuration.
 func LoadConfig(data []byte) (*Config, error) {
 	cfg := &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parsing config yaml: %w", err)
+
+	// KnownFields, so a key that is not part of the schema is an error rather
+	// than something quietly dropped.
+	//
+	// Without it a typo is close to undetectable. Every optional field here has
+	// a sensible fallback, so a mistyped key does not stop the server: the
+	// field keeps its zero value, the zero value resolves to a default, and the
+	// process comes up running numbers nobody chose. "concurency: 10" gave the
+	// pool runtime.NumCPU() workers with nothing written to the log.
+	//
+	// Some of those silent fallbacks have security consequences — a mistyped
+	// cookie_secure leaves the session cookie without Secure behind a TLS
+	// terminating proxy.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		// An empty document decodes to io.EOF, which is a valid config of
+		// nothing but defaults.
+		if !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("parsing config yaml: %w", err)
+		}
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
