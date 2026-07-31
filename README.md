@@ -551,6 +551,41 @@ jobE, _ := client.Enqueue("step.e", p, gqm.DependsOn(jobC.ID))
 
 Cycle detection (DFS, depth limit 100) runs at enqueue time — circular dependencies are rejected before any job is queued.
 
+A dependent may be enqueued before or after its parent finishes; both work. If
+the parent has already reached a terminal state, the dependent is resolved
+immediately at enqueue time rather than waiting for a promotion that will never
+come.
+
+### Chain latency under a burst
+
+When a dependency is resolved, the dependent is pushed to the **back** of its
+target queue, like any other job. That is the right default — it keeps newly
+enqueued work from being starved by long chains — but it has a consequence
+worth knowing before you measure.
+
+Enqueue 4,000 chains at once and every first stage lands in the queue ahead of
+every second stage. Each stage then waits for the previous stage's backlog to
+drain, and the wait shows up as chain latency that looks like the cost of DAG
+resolution but is really queue depth:
+
+| | 300 chains | 4,000 chains |
+|---|---|---|
+| stage 1 (p50) | 308ms | 377ms |
+| stage 2 (p50) | 330ms | 8.2s |
+
+Resolution itself did not get slower — the gap between the two stages went from
+22ms to eight seconds because there were thousands of stage-1 jobs in front.
+
+If that matters for your workload, two options:
+
+- **Give each stage its own queue and pool**, so a later stage is not queued
+  behind the stage that feeds it. This is usually the better answer, and it also
+  lets you size concurrency per stage.
+- **`gqm.EnqueueAtFront(true)`** on later stages, so chains already in flight
+  finish before new ones start. Only reach for this if the ordering between
+  chains genuinely does not matter — it prioritises work in progress over work
+  that arrived first.
+
 ## Cron Scheduling
 
 Cron works by automatically enqueuing jobs on a schedule. You define **what** to run (job type) and **when** (cron expression) — the scheduler handles the rest.
