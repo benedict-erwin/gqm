@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A dependent enqueued after its parent finished is no longer orphaned** — dependency resolution was driven entirely by the parent: on reaching a terminal state it read its `:dependents` set, promoted what it found, and deleted the set. A job enqueued after that moment was invisible to it and sat in `deferred` forever, with no error, no log and no dead-letter entry. Enqueuing a parent and then the work that depends on it is the ordinary way to build a chain, and the window widens the faster the parent runs — so this got *more* likely as a system got healthier. All three terminal states were affected: a completed parent left the child stuck, and a dead-lettered or canceled parent left it stuck rather than cancelling it, including when `AllowFailure` should have released it. `Enqueue` now checks parent status and runs the same resolution the worker would have; the existing `deferred` guard in the Lua makes doing it twice a no-op
+
 ## [0.2.0] — 2026-07-31
 
 Security release. Every finding from a full whitebox audit is addressed, and the

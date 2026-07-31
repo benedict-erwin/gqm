@@ -36,14 +36,13 @@ import (
 // Two modes:
 //
 //	GQM_STRESS_TEST=1   fast, ~10 seconds, run this regularly
-//	GQM_SOAK=1          long, ~10-18 minutes, finds what only volume reveals
+//	GQM_SOAK=1          long, ~20 seconds at 4000 payments, finds what only
+//	                    volume reveals
 //
-// KNOWN FAILURE — soak mode currently fails, and the failure is real. It
-// stalls around 3830-3860 of 3920 captures because dependents enqueued after
-// their parent has already completed are orphaned forever (gqm-6shx). The
-// window widens as the system gets faster, so volume exposes it and the fast
-// mode does not. This test is left asserting the truth rather than tuned until
-// it passes; a green soak run is the acceptance criterion for that fix.
+// Soak mode is what found gqm-6shx: dependents enqueued after their parent had
+// already finished were orphaned forever. It stalled at roughly 3840 of 3920
+// captures, and only at volume — the window widens the faster the system runs,
+// so the fast mode never reached it.
 
 // --- Domain -----------------------------------------------------------------
 
