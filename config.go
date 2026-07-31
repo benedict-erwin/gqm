@@ -121,7 +121,7 @@ type AuthConfig struct {
 type UserYAML struct {
 	Username     string `yaml:"username"`
 	PasswordHash string `yaml:"password_hash"` // bcrypt hash
-	Role         string `yaml:"role"`          // "admin" or "viewer"; defaults to "admin"
+	Role         string `yaml:"role"`          // "admin" or "viewer"; empty defaults to "viewer"
 }
 
 // APIConfig holds HTTP API settings from YAML.
@@ -146,7 +146,7 @@ type APIConfig struct {
 type APIKeyYAML struct {
 	Name string `yaml:"name"`
 	Key  string `yaml:"key"`  // prefix: gqm_ak_, minimum 32 chars
-	Role string `yaml:"role"` // "admin" or "viewer"; defaults to "admin"
+	Role string `yaml:"role"` // "admin" or "viewer"; empty defaults to "viewer"
 }
 
 const minAPIKeyLength = 32

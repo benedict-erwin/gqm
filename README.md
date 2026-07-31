@@ -15,7 +15,7 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 - **Delayed jobs** — Schedule jobs for future execution with `EnqueueAt()` / `EnqueueIn()`
 - **Retry & dead letter queue** — Configurable retry with fixed/exponential/custom backoff, automatic DLQ after max retries
 - **Unique jobs** — Idempotent enqueue via `Unique()` option (backed by atomic `HSETNX`)
-- **Dequeue strategies** — Strict priority, round-robin, or weighted (default) across multi-queue pools
+- **Dequeue strategies** — Strict priority (default), round-robin, or weighted across multi-queue pools
 - **Timeout hierarchy** — Job-level → pool-level → global default (always enforced, never disabled)
 - **Middleware** — Global handler middleware chain via `Server.Use()` for logging, metrics, tracing
 - **Error classification** — `IsFailure` predicate separates transient errors (retry without counting) from real failures
@@ -263,7 +263,7 @@ pools:
     queues: ["critical", "default"]
     concurrency: 10
     job_timeout: 60
-    dequeue_strategy: "weighted"  # strict, round_robin, weighted
+    dequeue_strategy: "weighted"  # strict (default), round_robin, weighted
     retry:
       max_retry: 5
       backoff: "exponential"      # fixed, exponential, custom
@@ -323,6 +323,181 @@ server, _ := gqm.NewServerFromConfig(cfg,
     gqm.WithSchedulerEnabled(false),         // worker-only instance
 )
 ```
+
+## Configuration Reference
+
+Queue libraries are full of near-synonyms — job type, queue, pool, worker,
+concurrency, priority — and they are easy to conflate. This section defines each
+one and lists every setting with its default.
+
+### The four nouns, and how they relate
+
+| Term | What it is |
+|---|---|
+| **Job type** | *What work this is*, e.g. `email.send`. You register a handler per job type. |
+| **Queue** | *Where a job waits*, a Redis list. Jobs are picked from it in order. |
+| **Pool** | *A group of workers*, bound to a set of job types and a set of queues. |
+| **Worker** | *One goroutine* inside a pool that takes one job at a time. |
+
+A pool answers two separate questions, which is the distinction behind
+`job_types` and `queues`:
+
+- **`job_types`** — *which handlers this pool owns.* A job type belongs to
+  exactly one pool; declaring it in two is a config error. This is what decides
+  which pool runs a job.
+- **`queues`** — *which Redis lists this pool reads from,* in priority order.
+  Several pools may read the same queue.
+
+So `job_types` is about ownership and `queues` is about where to look. A pool
+that owns `email.send` and reads `["critical", "default"]` will pick up
+`email.send` jobs from either queue, checking `critical` first.
+
+**`concurrency` is the worker count.** They are the same number under two names:
+`concurrency: 10` in YAML and `gqm.Workers(10)` in code both mean ten worker
+goroutines. Each worker handles one job at a time, so the pool runs at most
+`concurrency` jobs concurrently. See
+[Connection pool sizing](#connection-pool-sizing) — it is not the same as the
+Redis pool, and does not need to match it.
+
+### Priority: it comes from queue order, not `queues.priority`
+
+> **`queues.priority` is currently not read by anything.** It is parsed and
+> ignored. Setting `priority: 10` has no effect today. It is kept for
+> compatibility, and the example above shows it only because it has been there
+> since the first release.
+
+Priority is expressed by the **order of `pools.queues`**, combined with
+`dequeue_strategy`. In `queues: ["critical", "default", "low"]`, `critical` is
+position 0 and therefore the highest priority.
+
+### `dequeue_strategy`
+
+How a pool chooses among its queues when more than one has work. Only relevant
+for multi-queue pools.
+
+| Value | Behaviour | When to use |
+|---|---|---|
+| `strict` **(default)** | Always tries queues in the listed order. `critical` is fully drained before `default` is looked at. | Strong priority guarantees, and you accept that a busy high-priority queue can starve the rest. |
+| `round_robin` | Rotates the starting queue on each dequeue. Every queue gets an equal share regardless of position. | Queues are peers and none should dominate. |
+| `weighted` | Picks a starting queue at random, weighted by position — first queue gets weight N, second N-1, down to 1 — then falls through the rest in order. | Priority without starvation. The high-priority queue wins most of the time, but the low one always makes progress. |
+
+With three queues, `weighted` starts at position 0 about 50% of the time,
+position 1 about 33%, and position 2 about 17%.
+
+### `redis`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `addr` | string | `localhost:6379` | Host and port. |
+| `password` | string | — | `requirepass` or a Redis ACL user. **Required in production.** |
+| `db` | int | `0` | Redis database number. |
+| `prefix` | string | `gqm:` | Prepended to every key GQM writes. |
+| `tls` | bool | `false` | TLS with the system CA pool. |
+| `pool_size` | int | `0` | Max connections; `0` uses go-redis's `10 × GOMAXPROCS`. You almost certainly do not need to change this. Negative is rejected. |
+
+### `app`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `timezone` | string | system | IANA name, e.g. `Asia/Jakarta`. Fallback for cron entries that set none. |
+| `log_level` | string | — | `debug`, `info`, `warn`, `error`. Creates a logger unless `WithLogger()` is used, which always wins. |
+| `shutdown_timeout` | int (s) | `30` | How long shutdown waits for in-flight jobs. |
+| `global_job_timeout` | int (s) | `1800` | Last-resort cap on handler runtime. **Cannot be disabled** — every handler always has a deadline. |
+| `grace_period` | int (s) | `10` | Extra time a handler gets to clean up after its context is cancelled, before the worker abandons it. |
+| `result_ttl` | int (s) | `604800` (7d) | Retention for completed jobs. `-1` keeps forever, `0` deletes on completion. |
+| `failure_ttl` | int (s) | `2592000` (30d) | Retention for dead-lettered, canceled and stopped jobs. Longer than `result_ttl` on purpose: a failure is evidence somebody still has to act on. |
+
+Timeouts resolve job-level → pool-level → global, so `global_job_timeout` only
+applies where neither of the others is set.
+
+### `queues`
+
+| Key | Type | Notes |
+|---|---|---|
+| `name` | string | Max 128 chars. Colons are allowed (`email:send`). Must be unique. |
+| `priority` | int | **Not currently read.** See above. |
+
+Declaring queues here is optional — a queue is created on first use. The list is
+mainly documentation of the queues a deployment expects.
+
+### `pools`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `name` | string | — | Required, unique. |
+| `job_types` | []string | — | Job types this pool owns. A type may appear in only one pool. `["*"]` makes it the catch-all for any type not claimed elsewhere; only one catch-all is allowed. |
+| `queues` | []string | `["default"]` | Queues to read, highest priority first. |
+| `concurrency` | int | `runtime.NumCPU()` | Worker goroutines. `0` or omitted means NumCPU; negative is rejected. No upper limit. |
+| `job_timeout` | int (s) | falls back to global | Handler runtime cap for this pool. |
+| `grace_period` | int (s) | `app.grace_period` | Per-pool override. |
+| `shutdown_timeout` | int (s) | `app.shutdown_timeout` | Per-pool override. |
+| `dequeue_strategy` | string | `strict` | See above. |
+| `retry` | object | — | Pool-level retry defaults; see below. |
+
+### `pools[].retry`
+
+| Key | Type | Notes |
+|---|---|---|
+| `max_retry` | int | Attempts after the first failure. |
+| `backoff` | string | `fixed`, `exponential`, or `custom`. |
+| `backoff_base` | int (s) | Delay for `fixed`; starting delay for `exponential`. |
+| `backoff_max` | int (s) | Cap for `exponential`. Without it, the delay is capped at 24h. |
+| `intervals` | []int (s) | Explicit per-attempt delays, used with `backoff: custom`. |
+
+### `scheduler`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | Omitted means enabled. Set `false` for worker-only instances. |
+| `poll_interval` | int (s) | `1` | How often due delayed, scheduled and retrying jobs are promoted. Lower means faster promotion and more Redis traffic. |
+| `cron_entries` | []object | — | See below. |
+
+### `scheduler.cron_entries[]`
+
+| Key | Type | Notes |
+|---|---|---|
+| `id` | string | Unique; also the lock key for distributed scheduling. |
+| `name` | string | Human-readable label. |
+| `cron_expr` | string | **6 fields, including seconds**: `sec min hour dom month dow`. |
+| `timezone` | string | IANA name; falls back to `app.timezone`. |
+| `job_type` | string | Job type to enqueue. |
+| `queue` | string | Target queue. |
+| `payload` | string | JSON, as a string. |
+| `timeout` | int (s) | Handler runtime cap for the enqueued job. |
+| `max_retry` | int | Retries for the enqueued job. |
+| `overlap_policy` | string | `skip` (default) runs nothing if the previous run is still going; `allow` starts anyway; `replace` cancels the running one first. |
+| `enabled` | bool | Omitted means enabled. |
+
+### `monitoring.auth`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | With auth off, every caller is treated as admin. The server **refuses to start** in that state on a non-loopback address. |
+| `session_ttl` | int (s) | `86400` | Session cookie lifetime. |
+| `users[].username` | string | — | |
+| `users[].password_hash` | string | — | bcrypt. Generate with `gqm hash-password`. |
+| `users[].role` | string | `viewer` | `admin` or `viewer`. **Omitted means `viewer`** — least privilege, not most. |
+
+### `monitoring.api`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Also switched on implicitly by `dashboard.enabled`. |
+| `addr` | string | `:8080` | Listen address. |
+| `rate_limit` | int | `100` | Requests per second per IP. `-1` disables. `/health` is exempt. |
+| `trust_proxy` | bool | `false` | Let `X-Forwarded-Proto` decide whether the connection is HTTPS. Only safe when a proxy sets it and strips client values. |
+| `cookie_secure` | bool | `false` | Mark the session cookie `Secure` unconditionally. **Set this behind a TLS-terminating proxy**, or the browser will send session tokens over plain HTTP. |
+| `api_keys[].name` | string | — | Label. |
+| `api_keys[].key` | string | — | Prefix `gqm_ak_`, minimum 32 chars. |
+| `api_keys[].role` | string | `viewer` | Same rule as users. |
+
+### `monitoring.dashboard`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Turning this on also enables the API. |
+| `path_prefix` | string | `/dashboard` | Mount path. |
+| `custom_dir` | string | — | Serve a custom dashboard instead of the embedded one. Only asset file types are served, and symlinks cannot escape the directory. |
 
 ## Enqueue Options
 
