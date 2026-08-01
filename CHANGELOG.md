@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-08-01
+
+A single fix for a memory leak that has been present since retention shipped in
+0.2.0.
+
+### Upgrading
+
+**Dependents cancelled by a failing parent now expire.** They never did, so on
+any deployment that has run a DAG to failure there are records sitting in Redis
+with no expiry at all. This release gives new cancellations the `failure_ttl`
+window — 30 days by default — which is what the documentation has described
+since 0.2.0.
+
+Nothing breaks when you upgrade. The behaviour to be aware of is the same shape
+as the retention change in 0.2.0: records simply begin disappearing later, on
+whatever window you have configured. If you need cancelled jobs kept forever,
+that is what `failure_ttl: -1` is for.
+
+The fix applies to cancellations from this point on. Records already stranded
+without a TTL are referenced by nothing, so nothing will collect them; clearing
+them means a manual pass over `gqm:job:*` for hashes whose status is `canceled`
+and whose `TTL` is `-1`.
+
+### Fixed
+- **Dependents cancelled by a failing parent leaked forever** — `dag_cancel.lua` set the status to `canceled` and stopped there, taking no retention argument and never calling `EXPIRE`. A cancelled job belongs to no sorted set, so the surviving hash was referenced by nothing: absent from every listing, counted in no statistic, and reachable by no cleanup path. The admin cancel route handled this correctly and its own comment explains why; the cascade route was written without it. Retention is now resolved per job, since every job in a chain may carry its own override. `completed_at` is written too, so both routes to `canceled` leave the same record
+
 ## [0.3.0] — 2026-08-01
 
 A correctness release. The headline is a fix for jobs that could disappear
@@ -293,6 +319,7 @@ Initial feature-complete release. All planned phases (1–7) implemented.
 
 TUI module additionally uses `bubbletea` and `lipgloss` (Charm ecosystem).
 
+[0.3.1]: https://github.com/benedict-erwin/gqm/releases/tag/v0.3.1
 [0.3.0]: https://github.com/benedict-erwin/gqm/releases/tag/v0.3.0
 [0.2.0]: https://github.com/benedict-erwin/gqm/releases/tag/v0.2.0
 [0.1.2]: https://github.com/benedict-erwin/gqm/releases/tag/v0.1.2

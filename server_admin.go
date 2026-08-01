@@ -120,7 +120,7 @@ func (s *Server) CancelJob(ctx context.Context, jobID string) error {
 
 	// DAG: if deferred, propagate cancellation to dependents.
 	if status == StatusDeferred {
-		if err := propagateFailure(ctx, s.rc, s.scripts, jobID); err != nil {
+		if err := propagateFailure(ctx, s.rc, s.scripts, jobID, s.cfg.failureRetention); err != nil {
 			s.logger.Error("failed to propagate cancellation to dependents",
 				"job_id", jobID,
 				"error", err,

@@ -731,7 +731,7 @@ func (p *pool) deadLetterJob(ctx context.Context, job *Job, errMsg string) {
 
 	// DAG: propagate failure to dependents only if Lua detected the dependents set exists.
 	if val == 2 {
-		if err := propagateFailure(ctx, rc, p.server.scripts, job.ID); err != nil {
+		if err := propagateFailure(ctx, rc, p.server.scripts, job.ID, p.server.cfg.failureRetention); err != nil {
 			p.logger.Error("failed to propagate failure to dependents",
 				"job_id", job.ID,
 				"error", err,

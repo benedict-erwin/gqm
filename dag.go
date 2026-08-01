@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"time"
 )
 
 // maxDependencyDepth is the maximum depth for cycle detection traversal.
@@ -139,7 +141,7 @@ func resolveDependents(ctx context.Context, rc *RedisClient, scripts *scriptRegi
 // failed (moved to DLQ). For each dependent:
 //   - allow_failure=true: resolve normally (remove parent from pending_deps, promote if ready)
 //   - allow_failure=false: cancel the dependent and cascade to its own dependents
-func propagateFailure(ctx context.Context, rc *RedisClient, scripts *scriptRegistry, parentJobID string) error {
+func propagateFailure(ctx context.Context, rc *RedisClient, scripts *scriptRegistry, parentJobID string, failureRetention retentionResolver) error {
 	dependentsKey := rc.Key("job", parentJobID, "dependents")
 	dependentIDs, err := rc.rdb.SMembers(ctx, dependentsKey).Result()
 	if err != nil {
@@ -195,7 +197,7 @@ func propagateFailure(ctx context.Context, rc *RedisClient, scripts *scriptRegis
 			}
 		} else {
 			// Cancel dependent and cascade.
-			if err := cancelDependents(ctx, rc, scripts, depID); err != nil {
+			if err := cancelDependents(ctx, rc, scripts, depID, failureRetention); err != nil {
 				return err
 			}
 		}
@@ -215,12 +217,36 @@ func propagateFailure(ctx context.Context, rc *RedisClient, scripts *scriptRegis
 
 // cancelDependents atomically cancels a deferred job and recursively cascades
 // cancellation to all of its own dependents that have allow_failure=false.
-func cancelDependents(ctx context.Context, rc *RedisClient, scripts *scriptRegistry, jobID string) error {
-	return cancelDependentsRecursive(ctx, rc, scripts, jobID, 0)
+// retentionResolver turns a job's own retention override into the effective
+// window in seconds. serverConfig.failureRetention satisfies it directly; a
+// Client, which has no server settings to consult, supplies one that falls back
+// to the package default.
+//
+// It is threaded through the cancel cascade rather than resolved once because
+// every job in the chain may carry its own override.
+type retentionResolver func(override *int) int
+
+func cancelDependents(ctx context.Context, rc *RedisClient, scripts *scriptRegistry, jobID string, failureRetention retentionResolver) error {
+	return cancelDependentsRecursive(ctx, rc, scripts, jobID, 0, failureRetention)
+}
+
+// jobFailureTTLOverride reads a job's own failure_ttl, returning nil when the
+// job sets none. An unreadable or absent field is not an error: it simply means
+// there is no override and the resolver's fallback applies.
+func jobFailureTTLOverride(ctx context.Context, rc *RedisClient, jobKey string) *int {
+	raw, err := rc.rdb.HGet(ctx, jobKey, "failure_ttl").Result()
+	if err != nil || raw == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return nil
+	}
+	return &n
 }
 
 // cancelDependentsRecursive is the depth-limited implementation of cancelDependents.
-func cancelDependentsRecursive(ctx context.Context, rc *RedisClient, scripts *scriptRegistry, jobID string, depth int) error {
+func cancelDependentsRecursive(ctx context.Context, rc *RedisClient, scripts *scriptRegistry, jobID string, depth int, failureRetention retentionResolver) error {
 	if depth >= maxDependencyDepth {
 		return fmt.Errorf("cancel cascade depth exceeds %d for job %s", maxDependencyDepth, jobID)
 	}
@@ -233,6 +259,8 @@ func cancelDependentsRecursive(ctx context.Context, rc *RedisClient, scripts *sc
 	result := scripts.run(ctx, rc.rdb, "dag_cancel",
 		[]string{jobKey, deferredKey, pendingDepsKey},
 		jobID,
+		time.Now().Unix(),
+		failureRetention(jobFailureTTLOverride(ctx, rc, jobKey)),
 	)
 	if result.Err() != nil {
 		return fmt.Errorf("canceling dependent job %s: %w", jobID, result.Err())
@@ -292,7 +320,7 @@ func cancelDependentsRecursive(ctx context.Context, rc *RedisClient, scripts *sc
 			}
 		} else {
 			// Recursive cascade cancel.
-			if err := cancelDependentsRecursive(ctx, rc, scripts, depID, depth+1); err != nil {
+			if err := cancelDependentsRecursive(ctx, rc, scripts, depID, depth+1, failureRetention); err != nil {
 				return err
 			}
 		}
