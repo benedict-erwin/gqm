@@ -30,7 +30,10 @@ queues:
     - name: shipping:schedule
     - name: analytics:aggregate
 pools:
-    # Fast pool — high concurrency, strict priority (notification > email)
+    # Comms pool — high concurrency, strict priority (notification > email).
+    # strict means email:send waits until notification:push is empty; a busy
+    # notification queue starves it. Shown here to contrast with the pools
+    # below — weighted (the default) keeps every queue moving.
     - name: comms-pool
       job_types: ["email:send", "notification:push"]
       queues: ["notification:push", "email:send"]
