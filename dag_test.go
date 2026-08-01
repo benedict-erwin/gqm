@@ -257,7 +257,7 @@ func TestPropagateFailure_AllowFailure(t *testing.T) {
 		)
 	})
 
-	err := propagateFailure(ctx, rc, scripts, "parent")
+	err := propagateFailure(ctx, rc, scripts, "parent", clientFailureRetention)
 	if err != nil {
 		t.Fatalf("propagateFailure: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestPropagateFailure_CascadeCancel(t *testing.T) {
 		)
 	})
 
-	err := propagateFailure(ctx, rc, scripts, "parent")
+	err := propagateFailure(ctx, rc, scripts, "parent", clientFailureRetention)
 	if err != nil {
 		t.Fatalf("propagateFailure: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestCancelDependents_AlreadyPromoted(t *testing.T) {
 		)
 	})
 
-	err := cancelDependents(ctx, rc, scripts, "promoted-job")
+	err := cancelDependents(ctx, rc, scripts, "promoted-job", clientFailureRetention)
 	if err != nil {
 		t.Fatalf("cancelDependents: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestCancelDependents_MixedAllowFailure(t *testing.T) {
 		)
 	})
 
-	err := cancelDependents(ctx, rc, scripts, "parent")
+	err := cancelDependents(ctx, rc, scripts, "parent", clientFailureRetention)
 	if err != nil {
 		t.Fatalf("cancelDependents: %v", err)
 	}
@@ -599,7 +599,7 @@ func TestPropagateFailure_CleansUpDAGMetadata_AllowFailure(t *testing.T) {
 		)
 	})
 
-	if err := propagateFailure(ctx, rc, scripts, "lp-parent"); err != nil {
+	if err := propagateFailure(ctx, rc, scripts, "lp-parent", clientFailureRetention); err != nil {
 		t.Fatalf("propagateFailure: %v", err)
 	}
 
@@ -645,7 +645,7 @@ func TestPropagateFailure_CleansUpDAGMetadata_CascadeCancel(t *testing.T) {
 		)
 	})
 
-	if err := propagateFailure(ctx, rc, scripts, "cc-parent"); err != nil {
+	if err := propagateFailure(ctx, rc, scripts, "cc-parent", clientFailureRetention); err != nil {
 		t.Fatalf("propagateFailure: %v", err)
 	}
 

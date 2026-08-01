@@ -33,6 +33,20 @@ func NewClient(opts ...RedisOption) (*Client, error) {
 	return &Client{rc: rc, scripts: scripts}, nil
 }
 
+// clientFailureRetention resolves retention for a job the Client itself has to
+// cancel, which happens when a dependent is enqueued against a parent that has
+// already failed.
+//
+// A Client has no server settings to read, so a per-job override wins and the
+// package default applies otherwise. A deployment that configures a custom
+// app.failure_ttl and sets no per-job override will see this narrow path use
+// the default instead — a different window, not an unbounded one. Cancelled
+// jobs belong to no sorted set, so leaving one without any expiry at all would
+// mean a record nothing references and nothing ever collects.
+func clientFailureRetention(override *int) int {
+	return retentionTTL(override, defaultFailureTTLSeconds)
+}
+
 // Close closes the client's Redis connection.
 func (c *Client) Close() error {
 	return c.rc.Close()
@@ -217,7 +231,7 @@ func (c *Client) resolveAlreadyTerminalParents(ctx context.Context, job *Job) er
 			// propagateFailure honours allow_failure, so a dependent marked
 			// AllowFailure is released rather than cancelled — the same
 			// decision the worker would have made.
-			if err := propagateFailure(ctx, c.rc, c.scripts, parentID); err != nil {
+			if err := propagateFailure(ctx, c.rc, c.scripts, parentID, clientFailureRetention); err != nil {
 				return fmt.Errorf("propagating failure of parent %s to job %s: %w", parentID, job.ID, err)
 			}
 		}
