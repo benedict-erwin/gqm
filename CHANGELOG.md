@@ -5,7 +5,22 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] — 2026-08-01
+
+A correctness release. The headline is a fix for jobs that could disappear
+without a trace, and around it four breaking changes — every one of them in
+config, none of them in the public API. Nothing was removed from the API surface
+and one function was added, which is exactly why the version is decided by
+behaviour rather than signatures. That was true of 0.2.0 as well.
+
+**Three of the four breaking changes replace a silent misconfiguration with a
+refusal to start.** A typo in `gqm.yaml`, a pool listening on a queue nobody
+declared, a `queues[].priority` that never did anything — all of these used to be
+accepted quietly and produce a server running something other than what was
+written. They now stop at startup and name the field and line.
+
+**The fourth is itself silent, so read it first.** Changing the default
+`dequeue_strategy` does not error; it changes how a multi-queue pool picks work.
 
 ### Upgrading
 
@@ -278,6 +293,7 @@ Initial feature-complete release. All planned phases (1–7) implemented.
 
 TUI module additionally uses `bubbletea` and `lipgloss` (Charm ecosystem).
 
+[0.3.0]: https://github.com/benedict-erwin/gqm/releases/tag/v0.3.0
 [0.2.0]: https://github.com/benedict-erwin/gqm/releases/tag/v0.2.0
 [0.1.2]: https://github.com/benedict-erwin/gqm/releases/tag/v0.1.2
 [0.1.1]: https://github.com/benedict-erwin/gqm/releases/tag/v0.1.1
