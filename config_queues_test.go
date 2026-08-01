@@ -108,3 +108,43 @@ queues:
 		t.Errorf("error does not name the removed field: %v", err)
 	}
 }
+
+// An unset dequeue_strategy resolves to weighted. The distinction only matters
+// for a pool reading more than one queue, and there it matters a great deal:
+// under strict, a queue whose predecessor never runs dry is never read at all.
+// Measured with two full queues and one worker, the second queue's first job
+// came 301st under strict and 1st under weighted.
+//
+// Someone who does not set a strategy has not asked for starvation; they have
+// not thought about it. The default should be the one that keeps every queue
+// moving.
+func TestConfig_DefaultDequeueStrategyIsWeighted(t *testing.T) {
+	const cfg = `
+redis:
+  addr: "localhost:6379"
+queues:
+  - name: "critical"
+  - name: "low"
+pools:
+  - name: "p1"
+    job_types: ["a.b"]
+    queues: ["critical", "low"]
+`
+	c, err := LoadConfig([]byte(cfg))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.Pools[0].DequeueStrategy != "" {
+		t.Fatalf("fixture should leave the strategy unset, got %q", c.Pools[0].DequeueStrategy)
+	}
+
+	internal := PoolConfig{
+		Name:     c.Pools[0].Name,
+		JobTypes: c.Pools[0].JobTypes,
+		Queues:   c.Pools[0].Queues,
+	}.toInternal(0)
+
+	if internal.dequeueStrategy != StrategyWeighted {
+		t.Errorf("unset strategy resolved to %q, want %q", internal.dequeueStrategy, StrategyWeighted)
+	}
+}

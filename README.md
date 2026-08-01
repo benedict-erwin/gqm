@@ -15,7 +15,7 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 - **Delayed jobs** — Schedule jobs for future execution with `EnqueueAt()` / `EnqueueIn()`
 - **Retry & dead letter queue** — Configurable retry with fixed/exponential/custom backoff, automatic DLQ after max retries
 - **Unique jobs** — Idempotent enqueue via `Unique()` option (backed by atomic `HSETNX`)
-- **Dequeue strategies** — Strict priority (default), round-robin, or weighted across multi-queue pools
+- **Dequeue strategies** — Weighted (default), strict priority, or round-robin across multi-queue pools
 - **Timeout hierarchy** — Job-level → pool-level → global default (always enforced, never disabled)
 - **Middleware** — Global handler middleware chain via `Server.Use()` for logging, metrics, tracing
 - **Error classification** — `IsFailure` predicate separates transient errors (retry without counting) from real failures
@@ -260,7 +260,7 @@ pools:
     queues: ["critical", "default"]
     concurrency: 10
     job_timeout: 60
-    dequeue_strategy: "weighted"  # strict (default), round_robin, weighted
+    dequeue_strategy: "weighted"  # weighted (default), strict, round_robin
     retry:
       max_retry: 5
       backoff: "exponential"      # fixed, exponential, custom
@@ -381,9 +381,9 @@ for multi-queue pools.
 
 | Value | Behaviour | When to use |
 |---|---|---|
-| `strict` **(default)** | Always tries queues in the listed order. `critical` is fully drained before `default` is looked at. | Strong priority guarantees, and you accept that a busy high-priority queue can starve the rest. |
+| `strict` | Always tries queues in the listed order. `critical` is fully drained before `default` is looked at. | Strong priority guarantees, and you accept that a busy high-priority queue can starve the rest. |
 | `round_robin` | Rotates the starting queue on each dequeue. Every queue gets an equal share regardless of position. | Queues are peers and none should dominate. |
-| `weighted` | Picks a starting queue at random, weighted by position — first queue gets weight N, second N-1, down to 1 — then falls through the rest in order. | Priority without starvation. The high-priority queue wins most of the time, but the low one always makes progress. |
+| `weighted` **(default)** | Picks a starting queue at random, weighted by position — first queue gets weight N, second N-1, down to 1 — then falls through the rest in order. | Priority without starvation. The high-priority queue wins most of the time, but the low one always makes progress. |
 
 With three queues, `weighted` starts at position 0 about 50% of the time,
 position 1 about 33%, and position 2 about 17%.
@@ -439,7 +439,7 @@ empty queue forever without a word.
 | `job_timeout` | int (s) | falls back to global | Handler runtime cap for this pool. |
 | `grace_period` | int (s) | `app.grace_period` | Per-pool override. |
 | `shutdown_timeout` | int (s) | `app.shutdown_timeout` | Per-pool override. |
-| `dequeue_strategy` | string | `strict` | See above. |
+| `dequeue_strategy` | string | `weighted` | See above. |
 | `retry` | object | — | Pool-level retry defaults; see below. |
 
 ### `pools[].retry`
