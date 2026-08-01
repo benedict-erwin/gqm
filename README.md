@@ -1091,17 +1091,46 @@ gqm version                 Show version
 
 Benchmarked on Linux arm64 (Docker), Redis 7, Go 1.26, 4 vCPU. All operations use Lua scripts for atomic Redis state transitions.
 
+Figures are the **median of five runs**, so you can reproduce them from a clone:
+
+```bash
+go test -run '^$' -bench . -benchmem -count=5 -benchtime=3s -timeout=900s
+```
+
 ### Throughput
 
 | Operation | Latency | Throughput |
 |-----------|--------:|----------:|
-| Single enqueue | ~55 µs | **18,100 jobs/sec** |
-| End-to-end (enqueue → process → complete) | ~100 µs | **10,000 jobs/sec** |
-| Batch enqueue (100 jobs) | ~726 µs | **137,700 jobs/sec** |
-| Batch enqueue (1000 jobs) | ~7.3 ms | **137,800 jobs/sec** |
+| Single enqueue | 53.8 µs | **18,600 jobs/sec** |
+| End-to-end (enqueue → process → complete) | 100 µs | **10,000 jobs/sec** |
+| Batch enqueue (100 jobs) | 876 µs | **114,100 jobs/sec** |
+| Batch enqueue (500 jobs) | 4.36 ms | **114,800 jobs/sec** |
+| Batch enqueue (1000 jobs) | 8.79 ms | **113,800 jobs/sec** |
 | Burst drain (30 workers) | — | **19,700 jobs/sec** |
 | Large payload 10 KB | — | **1,607 jobs/sec** |
 | Large payload 100 KB | — | **346 jobs/sec** |
+
+**End-to-end is the noisy one.** The five runs behind that median spanned
+96–110 µs, about 13%, and repeating the whole command moved the median by 7%.
+Treat differences smaller than that as nothing — including differences between
+GQM releases.
+
+**Passing an explicit `Queue()` when you batch is worth roughly 16%.** Without
+one the queue name is derived from the job type for every job, costing about four
+allocations and 327 bytes each — 4,038 extra allocations per batch of 1,000,
+visible under `-benchmem`. The shipped benchmark does not pass one, so the table
+above is the slower path; if you are enqueuing in bulk and already know the
+queue, name it.
+
+The burst-drain and large-payload rows come from the stress suite rather than
+these benchmarks, and were not re-measured for this table.
+
+DAG chains are deliberately absent. The obvious measurement — time a chain of
+dependent jobs — is not a stable quantity: the benchmark enqueues every chain
+before waiting for any, so raising the iteration count overlaps more chains and
+the per-chain figure falls by nearly 3x with no code change. What governs DAG
+latency in practice is queue depth, covered under
+[Chain latency under a burst](#chain-latency-under-a-burst).
 
 ### Stress Test Highlights
 
