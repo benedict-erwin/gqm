@@ -16,6 +16,9 @@ redis:
   password: ""
   db: 0
   prefix: "gqm"   # Key prefix for all GQM data in Redis
+  # pool_size: 0  # Max Redis connections; 0 = go-redis default (10 x GOMAXPROCS).
+                  # Workers hold a connection only for one command, so this
+                  # rarely needs raising.
 
 # Application settings
 app:
@@ -28,11 +31,8 @@ app:
 # Queue definitions
 queues:
   - name: "default"
-    priority: 1
   # - name: "critical"
-  #   priority: 10
   # - name: "low"
-  #   priority: 0
 
 # Worker pool configuration
 pools:

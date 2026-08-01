@@ -14,22 +14,25 @@ app:
 
 queues:
   - name: email:high
-    priority: 10
   - name: email:low
-    priority: 1
   - name: report:generate
-    priority: 5
 
 pools:
   - name: email-pool
     job_types:
       - "email:send"
       - "email:bulk"
+    # Priority is the order of this list — first entry is highest.
+    # There is no priority number to assign anywhere.
     queues:
-      - "email:high"       # priority 10 — processed first
-      - "email:low"        # priority 1  — processed when high is empty
+      - "email:high"       # highest — drained first
+      - "email:low"        # only read once email:high is empty (see strategy below)
     concurrency: 4
     job_timeout: 30
+    # strict is deliberate here, and it has a cost: email:low is only read when
+    # email:high is empty, so a busy email:high starves it indefinitely. The
+    # default is weighted, which keeps every queue moving. Choose strict only
+    # when you truly want the lower queue to wait.
     dequeue_strategy: strict
     retry:
       max_retry: 5

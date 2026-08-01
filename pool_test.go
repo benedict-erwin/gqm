@@ -54,8 +54,11 @@ func TestPoolConfig_ToInternal(t *testing.T) {
 		if cfg.gracePeriod != serverGrace {
 			t.Errorf("gracePeriod = %v, want %v", cfg.gracePeriod, serverGrace)
 		}
-		if cfg.dequeueStrategy != StrategyStrict {
-			t.Errorf("dequeueStrategy = %q, want %q", cfg.dequeueStrategy, StrategyStrict)
+		// weighted, not strict: an unset strategy should not be able to starve
+		// a queue outright, which is what strict does when the queue above it
+		// never runs dry.
+		if cfg.dequeueStrategy != StrategyWeighted {
+			t.Errorf("dequeueStrategy = %q, want %q", cfg.dequeueStrategy, StrategyWeighted)
 		}
 	})
 

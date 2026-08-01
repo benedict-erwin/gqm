@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-01
+
+A correctness release. The headline is a fix for jobs that could disappear
+without a trace, and around it four breaking changes — every one of them in
+config, none of them in the public API. Nothing was removed from the API surface
+and one function was added, which is exactly why the version is decided by
+behaviour rather than signatures. That was true of 0.2.0 as well.
+
+**Three of the four breaking changes replace a silent misconfiguration with a
+refusal to start.** A typo in `gqm.yaml`, a pool listening on a queue nobody
+declared, a `queues[].priority` that never did anything — all of these used to be
+accepted quietly and produce a server running something other than what was
+written. They now stop at startup and name the field and line.
+
+**The fourth is itself silent, so read it first.** Changing the default
+`dequeue_strategy` does not error; it changes how a multi-queue pool picks work.
+
+### Upgrading
+
+**The default `dequeue_strategy` is now `weighted`, was `strict`.** This only
+affects pools reading more than one queue, and only when more than one has work
+— but there it is a real change. Under `strict` a queue is not read at all until
+the one above it runs dry; measured with two full queues and one worker, the
+second queue's first job came 301st. Under `weighted` it came 1st, taking about
+a third of the throughput.
+
+If you were relying on strict draining order, set it explicitly:
+
+```yaml
+pools:
+  - name: "payments"
+    queues: ["critical", "low"]
+    dequeue_strategy: "strict"
+```
+
+**`queues[].priority` has been removed.** It was parsed and never read by
+anything, so setting it never had an effect. Priority comes from the order of
+`pools[].queues`, combined with `dequeue_strategy`. Delete the field — with
+unknown keys now rejected, a config still carrying it will refuse to start.
+
+**A pool may only listen on queues declared under `queues:`.** Naming an
+undeclared queue used to be accepted, which meant a typo produced a pool that
+started, held its workers, and polled a queue nothing ever wrote to — no error,
+no log, a healthy-looking pool doing nothing. `default` is exempt and never
+needs declaring.
+
+**Unknown keys in `gqm.yaml` are now an error.** They used to be dropped in
+silence, which made a typo close to undetectable: the field kept its zero value,
+the zero value resolved to a default, and the server came up running numbers
+nobody chose. `concurency: 10` gave the pool `runtime.NumCPU()` workers with
+nothing in the log to say so. A mistyped `cookie_secure` left the session cookie
+without `Secure` behind a TLS proxy.
+
+If your config carries a key GQM does not recognise — a typo, or a leftover from
+an older version — the server will now refuse to start and name the field and
+line. Load it once and fix what it reports.
+
+One known case: `monitoring.enabled` and `monitoring.addr` were never real
+settings, and the bundled `09-dev-server` example used them. The real fields are
+`monitoring.api.enabled` and `monitoring.api.addr`; the example has been
+corrected.
+
+### Added
+- **`WithRedisPoolSize()` and `redis.pool_size`** — the Redis connection pool size was not reachable through GQM's own API: the client was built with `Addr`, `Password`, `DB` and `TLSConfig` and nothing else, so changing it meant constructing a `*redis.Client` by hand and injecting it. Unset still leaves go-redis to its default of `10 x GOMAXPROCS`, which is derived from CPU count and so ignores how many pools and workers are actually configured. Raising it is not like adding workers: a connection is a socket, not a process, so it costs nothing while idle — the real ceilings are the server's `maxclients`, the open-file limit, and buffer memory
+
+### Documentation
+- **Connection pool sizing** — README now says plainly not to size the pool to the worker count, with the measurement behind it: 100 workers and instant handlers push ~33,100 jobs/sec on a 4-core container whether the pool is the default 40 or an explicit 100, with no `ErrPoolTimeout` either way. Workers hold a connection for one command, not while waiting, and Redis executes commands one at a time — so past the point where Redis is kept busy, more connections buy nothing. The cases that do call for raising it are slow commands, not many workers
+- **DAG chain latency under a burst** — README explains that a resolved dependent is pushed to the back of its queue like any other job, so enqueuing thousands of chains at once puts every first stage ahead of every second stage. The wait that follows reads as slow DAG resolution and is really queue depth: measured across the same code, the gap between stage one and stage two went from 22ms at 300 chains to eight seconds at 4,000. Includes the two ways to avoid it and why the default is not changed
+- **Performance table re-measured and reproducible** — every figure is now the median of five runs from one command printed beside it, so the table can be reproduced from a clone. The previous numbers came from a comparison harness that is not in the repository, which is why the batch rows read about 20% higher than anything the shipped benchmark produces. The noise floor is stated too: end-to-end varies 13% across runs and 7% between whole invocations, so smaller differences are not signal. DAG chains are deliberately absent — the obvious measurement is not a stable quantity, since the benchmark enqueues every chain before waiting for any and the per-chain figure falls nearly 3x with a larger iteration count and no code change
+- **Examples no longer teach the removed priority field** — `_examples/06-config-driven` annotated its queue list with `priority 10` and `priority 1`, the exact values of the field that has been removed. Both multi-queue examples also presented `strict` without saying what it costs; each now names the starvation and points at the default. The examples are checked in CI from now on: every program is built and every shipped config is loaded, because `_examples` starts with an underscore and Go tooling skips it, so nothing here reached them before
+
+### Changed
+- **Default `dequeue_strategy` is `weighted`** — the code defaulted to `strict` while the recorded design decision, the architecture guide and the README all said `weighted`; the code was the outlier. Strict lets a busy queue starve the one below it outright, and someone who has not set a strategy has not asked for that — they have not thought about it. Explicit `strict` is untouched
+
+### Removed
+- **`queues[].priority`** — parsed, never read, never affected dispatch. Priority is the order of `pools[].queues`, which is also more expressive than a single number per queue: two pools can rank the same queues differently. A field that looks like it works is worse than no field
+
+### Testing
+- **Every job is accounted for under escalating load** — a new conservation check records what each enqueued job was promised and afterwards reads back the recorded status of every one of them, at load levels that double up to 51,200 jobs in a single level. Counting completions cannot find a job that vanished, because the vanished job was never counted. The mix deliberately includes DAG chains and delayed jobs: `DependsOn` and every scheduler call appeared zero times in the existing stress suite, which is why the orphaned-dependent bug fixed in this release went unseen there. It also asserts no duplicate execution, no dependency set surviving the drain, and goroutines back at the level measured before any server existed. Both invariants were proven to fail before being trusted
+
+### Fixed
+- **A pool listening on an undeclared queue is now a config error** — the `queues:` block and `pools[].queues` were never checked against each other, so a mistyped queue name gave a pool that ran, held workers, and polled an empty queue forever without a word. `default` stays exempt, since it is the fallback for jobs with no queue and for pools that declare none
+- **Mistyped config keys are no longer ignored** — `LoadConfig` now decodes with `KnownFields`, so a key outside the schema fails with the field name and line instead of being dropped. Every optional field has a sensible fallback, which is exactly what made this dangerous: a typo did not stop the server, it started one configured differently from what was written. Found a real instance immediately — the bundled dev-server example set `monitoring.enabled` and `monitoring.addr`, neither of which exists
+- **A dependent enqueued after its parent finished is no longer orphaned** — dependency resolution was driven entirely by the parent: on reaching a terminal state it read its `:dependents` set, promoted what it found, and deleted the set. A job enqueued after that moment was invisible to it and sat in `deferred` forever, with no error, no log and no dead-letter entry. Enqueuing a parent and then the work that depends on it is the ordinary way to build a chain, and the window widens the faster the parent runs — so this got *more* likely as a system got healthier. All three terminal states were affected: a completed parent left the child stuck, and a dead-lettered or canceled parent left it stuck rather than cancelling it, including when `AllowFailure` should have released it. `Enqueue` now checks parent status and runs the same resolution the worker would have; the existing `deferred` guard in the Lua makes doing it twice a no-op
+
 ## [0.2.0] — 2026-07-31
 
 Security release. Every finding from a full whitebox audit is addressed, and the
@@ -208,6 +293,7 @@ Initial feature-complete release. All planned phases (1–7) implemented.
 
 TUI module additionally uses `bubbletea` and `lipgloss` (Charm ecosystem).
 
+[0.3.0]: https://github.com/benedict-erwin/gqm/releases/tag/v0.3.0
 [0.2.0]: https://github.com/benedict-erwin/gqm/releases/tag/v0.2.0
 [0.1.2]: https://github.com/benedict-erwin/gqm/releases/tag/v0.1.2
 [0.1.1]: https://github.com/benedict-erwin/gqm/releases/tag/v0.1.1

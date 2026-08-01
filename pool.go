@@ -70,7 +70,7 @@ type PoolConfig struct {
 	JobTimeout      time.Duration   // Pool-level job timeout (0 = fall back to global)
 	GracePeriod     time.Duration   // Grace period after context cancel (0 = use server default)
 	ShutdownTimeout time.Duration   // Shutdown wait time (0 = use server default)
-	DequeueStrategy DequeueStrategy // How to select from multiple queues (default: strict)
+	DequeueStrategy DequeueStrategy // How to select from multiple queues (default: weighted)
 	RetryPolicy     *RetryPolicy    // Pool-level retry defaults (nil = use job-level)
 }
 
@@ -98,7 +98,14 @@ func (pc PoolConfig) toInternal(serverGracePeriod time.Duration) *poolConfig {
 
 	strategy := pc.DequeueStrategy
 	if strategy == "" {
-		strategy = StrategyStrict
+		// weighted rather than strict. The two differ only when more than one
+		// queue has work, and there strict means the lower queue is not read
+		// at all until the higher one runs dry — measured with two full queues
+		// and one worker, the second queue's first job came 301st under strict
+		// and 1st under weighted. Someone who has not set a strategy has not
+		// asked for that; they have not thought about it, and the default
+		// should be the one that keeps every queue moving.
+		strategy = StrategyWeighted
 	}
 
 	return &poolConfig{

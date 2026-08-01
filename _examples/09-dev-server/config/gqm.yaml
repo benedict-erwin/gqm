@@ -21,25 +21,19 @@ app:
     shutdown_timeout: 30
 queues:
     - name: email:send
-      priority: 5
     - name: report:generate
-      priority: 3
     - name: notification:push
-      priority: 7
     - name: image:resize
-      priority: 1
     - name: data:export
-      priority: 3
     - name: invoice:generate
-      priority: 5
     - name: payment:process
-      priority: 8
     - name: shipping:schedule
-      priority: 4
     - name: analytics:aggregate
-      priority: 2
 pools:
-    # Fast pool — high concurrency, strict priority (notification > email)
+    # Comms pool — high concurrency, strict priority (notification > email).
+    # strict means email:send waits until notification:push is empty; a busy
+    # notification queue starves it. Shown here to contrast with the pools
+    # below — weighted (the default) keeps every queue moving.
     - name: comms-pool
       job_types: ["email:send", "notification:push"]
       queues: ["notification:push", "email:send"]
@@ -138,8 +132,6 @@ scheduler:
           max_retry: 1
           enabled: false
 monitoring:
-    enabled: true
-    addr: ":8080"
     dashboard:
         enabled: true
     auth:
@@ -156,6 +148,8 @@ monitoring:
               password_hash: "CHANGE-ME-RUN-gqm-hash-password"
               role: admin
     api:
+        enabled: true
+        addr: ":8080"
         api_keys:
             - name: dev-key
               key: "gqm_ak_dev_server_config_key_for_testing_only"

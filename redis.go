@@ -22,6 +22,9 @@ type RedisConfig struct {
 	DB        int
 	Prefix    string
 	TLSConfig *tls.Config
+	// PoolSize is the maximum number of socket connections. Zero leaves
+	// go-redis to its default of 10*GOMAXPROCS.
+	PoolSize int
 
 	// existingClient allows injecting a pre-configured *redis.Client,
 	// bypassing the built-in connection setup. When set, Addr, Password,
@@ -57,6 +60,7 @@ func NewRedisClient(opts ...RedisOption) (*RedisClient, error) {
 			Password:  cfg.Password,
 			DB:        cfg.DB,
 			TLSConfig: cfg.TLSConfig,
+			PoolSize:  cfg.PoolSize, // 0 keeps the go-redis default
 		})
 	}
 
@@ -119,6 +123,30 @@ func WithRedisPassword(password string) RedisOption {
 // WithRedisDB sets the Redis database number.
 func WithRedisDB(db int) RedisOption {
 	return func(cfg *RedisConfig) { cfg.DB = db }
+}
+
+// WithRedisPoolSize sets the maximum number of Redis connections. Zero, the
+// default, leaves go-redis to its own default of 10*GOMAXPROCS.
+//
+// That default is derived from CPU count, which suits a CPU-bound workload and
+// fits this one less well: GQM's traffic is short Redis commands, so the
+// number worth tuning is how many are in flight at once, not how many cores
+// the machine has. A two-core host gets twenty connections no matter how many
+// pools and workers are configured.
+//
+// Raising it is not the same as adding workers. A connection is a socket — a
+// file descriptor and a couple of buffers — not a process, so it costs no CPU
+// while idle and hundreds are unremarkable. The real ceilings are the server's
+// maxclients (10000 by default), the open-file limit on both ends, and memory
+// for connection buffers.
+//
+// You are unlikely to need this. Workers do not hold a connection while
+// waiting for work: dequeue runs a Lua script and then sleeps without one, so
+// a connection is held only for the duration of a single command. And running
+// out is not a silent stall — go-redis waits up to PoolTimeout and then
+// returns ErrPoolTimeout, which is visible in logs.
+func WithRedisPoolSize(n int) RedisOption {
+	return func(cfg *RedisConfig) { cfg.PoolSize = n }
 }
 
 // WithPrefix sets the key prefix for all GQM keys.

@@ -13,6 +13,9 @@ import (
 type Client struct {
 	rc          *RedisClient
 	knownQueues sync.Map // tracks queues already registered via SADD
+	// scripts is needed because enqueuing a dependent may have to resolve it
+	// immediately, using the same Lua the worker uses when a parent finishes.
+	scripts *scriptRegistry
 }
 
 // NewClient creates a new Client with the given Redis options.
@@ -21,7 +24,13 @@ func NewClient(opts ...RedisOption) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating client: %w", err)
 	}
-	return &Client{rc: rc}, nil
+	// Reads the embedded Lua and builds the script objects; no Redis round
+	// trip, so this stays cheap even for a short-lived client.
+	scripts := newScriptRegistry()
+	if err := scripts.load(); err != nil {
+		return nil, fmt.Errorf("loading lua scripts: %w", err)
+	}
+	return &Client{rc: rc, scripts: scripts}, nil
 }
 
 // Close closes the client's Redis connection.
@@ -152,7 +161,68 @@ func (c *Client) enqueueDeferred(ctx context.Context, job *Job) (*Job, error) {
 		return nil, fmt.Errorf("enqueuing deferred job %s: %w", job.ID, err)
 	}
 
+	if err := c.resolveAlreadyTerminalParents(ctx, job); err != nil {
+		return nil, err
+	}
+
 	return job, nil
+}
+
+// resolveAlreadyTerminalParents handles a parent that finished before this job
+// was written into its dependents set.
+//
+// Dependency resolution is normally driven by the parent: when it reaches a
+// terminal state the worker reads its :dependents set and promotes or cancels
+// what it finds. A job enqueued after that moment is invisible to it — the set
+// was read while empty and then deleted, and re-creating it here would leave a
+// set nobody reads again. The job would sit in "deferred" forever, with no
+// error, no log and no dead-letter entry to show for it.
+//
+// The window is small but it is not exotic: enqueuing a parent and then the
+// work that depends on it is the ordinary way to build a chain, and the faster
+// the parent runs the likelier it is to finish first.
+//
+// This deliberately calls the same functions the worker calls rather than
+// reimplementing the decision. Doing it twice is harmless: dag_resolve.lua only
+// acts on a job still marked "deferred", so whichever path runs second is a no
+// op.
+func (c *Client) resolveAlreadyTerminalParents(ctx context.Context, job *Job) error {
+	if len(job.DependsOn) == 0 {
+		return nil
+	}
+
+	// One pipelined read for the whole set of parents: on the ordinary path,
+	// where nothing is terminal yet, this is all the extra work that happens.
+	pipe := c.rc.rdb.Pipeline()
+	cmds := make([]*redis.StringCmd, len(job.DependsOn))
+	for i, parentID := range job.DependsOn {
+		cmds[i] = pipe.HGet(ctx, c.rc.Key("job", parentID), "status")
+	}
+	// redis.Nil for a missing parent is expected, not an error.
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return fmt.Errorf("reading parent status for job %s: %w", job.ID, err)
+	}
+
+	for i, parentID := range job.DependsOn {
+		status, err := cmds[i].Result()
+		if err != nil {
+			continue // parent hash gone or unreadable; nothing to resolve against
+		}
+		switch status {
+		case "completed":
+			if _, err := resolveDependents(ctx, c.rc, c.scripts, parentID); err != nil {
+				return fmt.Errorf("resolving completed parent %s for job %s: %w", parentID, job.ID, err)
+			}
+		case "dead_letter", "canceled", "stopped", "failed":
+			// propagateFailure honours allow_failure, so a dependent marked
+			// AllowFailure is released rather than cancelled — the same
+			// decision the worker would have made.
+			if err := propagateFailure(ctx, c.rc, c.scripts, parentID); err != nil {
+				return fmt.Errorf("propagating failure of parent %s to job %s: %w", parentID, job.ID, err)
+			}
+		}
+	}
+	return nil
 }
 
 // EnqueueAt creates a new job scheduled for execution at the given time.

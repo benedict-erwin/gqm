@@ -17,7 +17,9 @@ import (
 )
 
 const (
-	// dequeueTimeout is the BLMOVE/poll timeout before looping.
+	// dequeueTimeout is how long a worker sleeps when every queue is empty
+	// before polling again. Dequeue itself does not block: it runs a Lua script
+	// and releases the connection.
 	dequeueTimeout = 1 * time.Second
 
 	// maxAbandonedHandlers is the per-pool limit for leaked handler goroutines.

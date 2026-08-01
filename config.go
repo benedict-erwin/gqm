@@ -1,9 +1,12 @@
 package gqm
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"runtime"
@@ -29,7 +32,8 @@ type RedisYAML struct {
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
 	Prefix   string `yaml:"prefix"`
-	TLS      bool   `yaml:"tls"` // enable TLS with system CA pool
+	TLS      bool   `yaml:"tls"`       // enable TLS with system CA pool
+	PoolSize int    `yaml:"pool_size"` // max connections; 0 = go-redis default (10*GOMAXPROCS)
 }
 
 // AppConfig holds application-level settings from YAML.
@@ -52,10 +56,15 @@ type AppConfig struct {
 	FailureTTL *int `yaml:"failure_ttl"` // seconds, default 2592000 (30 days)
 }
 
-// QueueDef declares a named queue with optional priority metadata.
+// QueueDef declares a queue that pools are allowed to listen on.
+//
+// There is no priority field. Priority is expressed by the order of a pool's
+// queues list, combined with its dequeue strategy, which lets two pools rank
+// the same queues differently — something a single number per queue could not
+// express. A priority field existed here once, was never read by anything, and
+// was removed rather than left looking meaningful.
 type QueueDef struct {
-	Name     string `yaml:"name"`
-	Priority int    `yaml:"priority"`
+	Name string `yaml:"name"`
 }
 
 // PoolYAML holds worker pool configuration from YAML.
@@ -120,7 +129,7 @@ type AuthConfig struct {
 type UserYAML struct {
 	Username     string `yaml:"username"`
 	PasswordHash string `yaml:"password_hash"` // bcrypt hash
-	Role         string `yaml:"role"`          // "admin" or "viewer"; defaults to "admin"
+	Role         string `yaml:"role"`          // "admin" or "viewer"; empty defaults to "viewer"
 }
 
 // APIConfig holds HTTP API settings from YAML.
@@ -145,7 +154,7 @@ type APIConfig struct {
 type APIKeyYAML struct {
 	Name string `yaml:"name"`
 	Key  string `yaml:"key"`  // prefix: gqm_ak_, minimum 32 chars
-	Role string `yaml:"role"` // "admin" or "viewer"; defaults to "admin"
+	Role string `yaml:"role"` // "admin" or "viewer"; empty defaults to "viewer"
 }
 
 const minAPIKeyLength = 32
@@ -160,8 +169,27 @@ type DashboardConfig struct {
 // LoadConfig parses YAML bytes and validates the resulting configuration.
 func LoadConfig(data []byte) (*Config, error) {
 	cfg := &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parsing config yaml: %w", err)
+
+	// KnownFields, so a key that is not part of the schema is an error rather
+	// than something quietly dropped.
+	//
+	// Without it a typo is close to undetectable. Every optional field here has
+	// a sensible fallback, so a mistyped key does not stop the server: the
+	// field keeps its zero value, the zero value resolves to a default, and the
+	// process comes up running numbers nobody chose. "concurency: 10" gave the
+	// pool runtime.NumCPU() workers with nothing written to the log.
+	//
+	// Some of those silent fallbacks have security consequences — a mistyped
+	// cookie_secure leaves the session cookie without Secure behind a TLS
+	// terminating proxy.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		// An empty document decodes to io.EOF, which is a valid config of
+		// nothing but defaults.
+		if !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("parsing config yaml: %w", err)
+		}
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
@@ -210,6 +238,10 @@ func (c *Config) validate() error {
 	}
 	// -1 is the "retain permanently" sentinel; anything below it is a typo, not
 	// a policy, so reject it rather than silently treating it as permanent.
+	if c.Redis.PoolSize < 0 {
+		return fmt.Errorf("redis.pool_size must be >= 0 (0 = go-redis default)")
+	}
+
 	if c.App.ResultTTL != nil && *c.App.ResultTTL < -1 {
 		return fmt.Errorf("app.result_ttl must be >= -1 (-1 = permanent, 0 = delete immediately)")
 	}
@@ -231,6 +263,10 @@ func (c *Config) validate() error {
 		}
 		queueNames[q.Name] = true
 	}
+	// "default" is where a job with no Queue() lands, and what a pool falls
+	// back to when it lists none. Requiring it to be spelled out would put a
+	// line that says nothing into every minimal config.
+	queueNames["default"] = true
 
 	// Pools
 	poolNames := make(map[string]bool, len(c.Pools))
@@ -247,6 +283,16 @@ func (c *Config) validate() error {
 
 		if len(p.JobTypes) == 0 {
 			return fmt.Errorf("pools[%d] %q: job_types must have at least one entry", i, p.Name)
+		}
+
+		// A pool may only listen on queues that were declared. Without this a
+		// typo produces a pool that starts, holds its workers, and polls a
+		// queue nothing ever writes to — no error, no log, and a dashboard
+		// showing a healthy pool doing nothing.
+		for qi, q := range p.Queues {
+			if !queueNames[q] {
+				return fmt.Errorf("pools[%d] %q: queues[%d] %q is not declared under queues:", i, p.Name, qi, q)
+			}
 		}
 
 		// Check catch-all
@@ -558,6 +604,9 @@ func NewServerFromConfig(cfg *Config, opts ...ServerOption) (*Server, error) {
 	}
 	if cfg.Redis.DB != 0 {
 		redisOpts = append(redisOpts, WithRedisDB(cfg.Redis.DB))
+	}
+	if cfg.Redis.PoolSize != 0 {
+		redisOpts = append(redisOpts, WithRedisPoolSize(cfg.Redis.PoolSize))
 	}
 	if cfg.Redis.Prefix != "" {
 		redisOpts = append(redisOpts, WithPrefix(cfg.Redis.Prefix))

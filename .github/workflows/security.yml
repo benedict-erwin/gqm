@@ -63,6 +63,27 @@ jobs:
             exit 1
           fi
 
+      # Go tooling ignores any path component starting with an underscore, so
+      # "go build ./..." and "go vet ./..." never reach _examples. An example is
+      # documentation that runs, and it can stop compiling against a changed API
+      # without a single step here turning red. Building each one explicitly is
+      # the only way this workflow sees them.
+      - name: build examples
+        run: |
+          set -euo pipefail
+          mapfile -t dirs < <(find _examples -name '*.go' -exec dirname {} \; | sort -u)
+          # A gate that finds nothing to build reports success forever. If the
+          # directory is renamed, this must fail rather than quietly pass.
+          if [ "${#dirs[@]}" -eq 0 ]; then
+            echo "::error::no example programs found under _examples — this gate is no longer checking anything"
+            exit 1
+          fi
+          echo "building ${#dirs[@]} example programs"
+          for d in "${dirs[@]}"; do
+            echo "  $d"
+            go build -o /dev/null "./$d"
+          done
+
       - name: go test -race
         run: |
           set -o pipefail
