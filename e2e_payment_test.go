@@ -771,10 +771,22 @@ func TestE2E_PaymentIdempotencyUnderContention(t *testing.T) {
 
 // --- Benchmark --------------------------------------------------------------
 
-// BenchmarkE2E_PaymentChain measures a whole authorize -> capture -> settle ->
-// invoice chain, not a single enqueue. ns/op here is the cost of moving one
-// payment all the way through, which is the number an operator actually cares
-// about; BenchmarkEndToEnd's figure covers one hop.
+// BenchmarkE2E_PaymentChain measures GQM's orchestration cost for a whole
+// authorize -> capture -> settle -> invoice chain, where BenchmarkEndToEnd
+// covers a single hop. It borrows this file's payload and queue routing, so the
+// data and the shape are the realistic part.
+//
+// The behaviour is not. Every handler returns nil: no declines, no retries, no
+// panics, none of the failure mix TestE2E_PaymentGateway injects through
+// outcomeFor. What is left is the cost of moving work between stages, which is
+// the point — but it is not the cost of processing a payment.
+//
+// Do not quote ns/op as a per-chain latency. The loop enqueues all b.N chains
+// before waiting for any of them, so a larger b.N overlaps more chains and the
+// figure falls: 5.16ms/op at -benchtime=300x against 1.79ms/op at
+// -benchtime=3s, same code. It is a throughput measure whose denominator moves,
+// useful for comparing two commits at an identical b.N and misleading anywhere
+// else.
 func BenchmarkE2E_PaymentChain(b *testing.B) {
 	if os.Getenv("GQM_TEST_REDIS_ADDR") == "" && testRedisAddr() == "" {
 		b.Skip("requires Redis")
