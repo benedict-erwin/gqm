@@ -903,6 +903,37 @@ for f in docker-compose.yml .devcontainer/docker-compose.yml; do
 done
 
 # ===========================================================================
+head_ "EX-01  Shipped example configs must not carry a usable credential"
+# ===========================================================================
+
+# An example config is copied verbatim by people starting out. A working bcrypt
+# hash committed in one is a publicly known admin password for every deployment
+# that copied it, and the reader has no way to tell it was meant to be replaced
+# because it works. The example that ships auth deliberately carries an invalid
+# placeholder so the server refuses to start until the reader runs
+# 'gqm hash-password'.
+#
+# The trap this guards against is someone "fixing" that example by pasting a
+# real hash to make it start. That reads like an improvement and is the exact
+# regression this check exists to catch.
+
+example_cfgs=$(find "$REPO_ROOT/_examples" -name '*.yaml' -o -name '*.yml' 2>/dev/null)
+if [[ -z "$example_cfgs" ]]; then
+  # Finding nothing to check is not a pass; it means this section stopped
+  # covering anything.
+  bad "example configs are present to be checked" "at least one yaml under _examples" "none found"
+else
+  live_hash=$(grep -nE 'password_hash:[[:space:]]*"?\$2' $example_cfgs || true)
+  if [[ -z "$live_hash" ]]; then
+    ok "no example config ships a working bcrypt hash"
+  else
+    bad "no example config ships a working bcrypt hash" \
+        "every password_hash a placeholder the reader must replace" \
+        "$(tr '\n' ' ' <<<"$live_hash")"
+  fi
+fi
+
+# ===========================================================================
 printf '\n\033[1mSummary\033[0m\n'
 printf '  passed: %d\n  failed: %d\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then
