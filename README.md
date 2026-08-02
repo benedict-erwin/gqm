@@ -1056,20 +1056,28 @@ export GQM_API_KEY=gqm_ak_xxx
 gqm tui
 ```
 
-4 tabs: Queues, Workers, Failed, Cron. Auto-refreshes every second.
+5 tabs: Queues, Workers, Failed, Cron, DAG. Data auto-refreshes every 3 seconds; the header clock ticks every second and a `●` indicator shows connection health (green = live, amber = stale, red = unreachable). Colors adapt to light and dark terminals.
+
+Mutating actions (pause, retry, delete, trigger, enable/disable) ask for an inline `[y/N]` confirmation. `enter` drills down everywhere: a queue opens its recent jobs, a failed job opens a scrollable detail with the full error and pretty-printed payload, a cron entry opens its trigger history, and a DAG chain renders the dependency graph as boxes and connectors (large graphs fall back to an indented tree view). `/` filters any job list by ID.
 
 **Keyboard shortcuts:**
 
 | Key | Action |
 |-----|--------|
-| `1-4` | Switch tab directly |
+| `1-5` | Switch tab directly |
 | `Tab` / `Shift+Tab` | Cycle tabs |
-| `j/k` or `Up/Down` | Navigate list |
-| `h/l` or `Left/Right` | Switch queue (Failed tab) |
+| `j/k` or `Up/Down` | Navigate list / scroll detail |
+| `h/l` or `Left/Right` | Switch queue (Failed tab), select node (DAG graph) |
+| `Enter` | Open queue jobs (Queues) / job detail (Failed) / history (Cron) / graph (DAG) |
+| `/` | Filter by job ID (any job list) |
 | `p` | Pause/resume queue (Queues tab) |
-| `r` | Retry failed job (Failed tab) |
-| `t` | Trigger cron entry (Cron tab) |
+| `r` | Retry job (Failed tab, job detail) |
+| `d` | Delete job (Failed tab, job detail) |
+| `t` | Trigger cron entry (Cron tab) · tree view (DAG graph) |
 | `e` | Enable/disable cron entry (Cron tab) |
+| `g` | Box view (DAG graph) |
+| `?` | Keyboard help overlay |
+| `Esc` | Close detail / graph / overlay · clear filter |
 | `F5` | Force refresh |
 | `q` / `Ctrl+C` | Quit |
 
@@ -1077,15 +1085,17 @@ gqm tui
 
 ```
 gqm init                    Generate template gqm.yaml
-gqm set-password <user>     Set/update dashboard password
-gqm add-api-key <name>      Add API key to config
-gqm revoke-api-key <name>   Remove API key from config
-gqm hash-password           Generate bcrypt hash
-gqm generate-api-key        Generate random API key
+gqm set-password            Set/update a user password (interactive; --config, --user)
+gqm add-api-key             Generate and add an API key (--config, --name)
+gqm revoke-api-key          Remove an API key (--config, --name)
+gqm hash-password <pw>      Generate bcrypt hash (pipe-safe)
+gqm generate-api-key        Generate random API key (pipe-safe)
 gqm dashboard export <dir>  Export embedded dashboard for customization
 gqm tui [--api-url <url>] [--api-key <key>]  Launch terminal monitor
 gqm version                 Show version
 ```
+
+Output is colored only on a TTY — piped output stays plain, and `NO_COLOR` disables styling entirely. `revoke-api-key` asks for confirmation on a terminal; scripts and pipes proceed unprompted.
 
 ## Performance
 

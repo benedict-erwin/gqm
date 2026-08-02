@@ -27,7 +27,7 @@ Use the output in your GQM config file for api.api_keys[].key.`)
 
 	key, err := generateAPIKey()
 	if err != nil {
-		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		errLine(stderr, "%v", err)
 		return 1
 	}
 

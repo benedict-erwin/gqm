@@ -10,7 +10,11 @@ GQM.pages.workers = {
 
     render: function(container) {
         container.innerHTML =
-            '<div class="page-header"><h2>Workers</h2></div>' +
+            GQM.utils.pageHead({
+                title: 'Workers',
+                sub: 'Worker pools with live heartbeat',
+                poll: '10s'
+            }) +
             '<div id="workers-table" class="table-wrap"><div class="loading">Loading workers</div></div>';
 
         GQM.app.poll(function() { GQM.pages.workers.load(); }, 10000);
@@ -46,17 +50,17 @@ GQM.pages.workers = {
                 return '<tr>' +
                     '<td class="mono truncate"><a href="#/queues?pool=' + encodeURIComponent(w.pool_id || w.id || '') + '">' + GQM.utils.escapeHTML(w.pool_id || w.id || '') + '</a></td>' +
                     '<td>' + statusBadge + '</td>' +
-                    '<td>' + GQM.utils.escapeHTML(w.concurrency || '') + '</td>' +
+                    '<td class="num">' + GQM.utils.escapeHTML(w.concurrency || '') + '</td>' +
                     '<td>' + queues + '</td>' +
-                    '<td>' + GQM.utils.escapeHTML(w.active_jobs || '0') + '</td>' +
-                    '<td>' + (hb ? GQM.utils.formatRelative(hb) : '—') + '</td>' +
-                    '<td>' + GQM.utils.formatTime(parseInt(w.started_at || '0')) + '</td>' +
+                    '<td class="num">' + GQM.utils.escapeHTML(w.active_jobs || '0') + '</td>' +
+                    '<td class="dim" title="' + GQM.utils.escapeHTML(GQM.utils.formatTime(hb)) + '">' + (hb ? GQM.utils.formatRelative(hb) : '—') + '</td>' +
+                    '<td class="dim">' + GQM.utils.formatTime(parseInt(w.started_at || '0')) + '</td>' +
                     '</tr>';
             }).join('');
 
             el.innerHTML =
                 '<table><thead><tr>' +
-                '<th>Pool ID</th><th>Status</th><th>Concurrency</th><th>Queues</th><th>Active Jobs</th><th>Last Heartbeat</th><th>Started</th>' +
+                '<th>Pool</th><th>Status</th><th class="num">Concurrency</th><th>Queues</th><th class="num">Active jobs</th><th>Heartbeat</th><th>Started</th>' +
                 '</tr></thead><tbody>' + rows + '</tbody></table>';
         }).catch(function() {
             var el = document.getElementById('workers-table');

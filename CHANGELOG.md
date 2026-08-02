@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-08-02
+
+A user-interface release: every surface you look at — web dashboard, CLI
+output, and the terminal UI — was redesigned around one visual language.
+Nothing in the queue engine changed. The public Go API gains three types
+(`DagNode`, `DagEdge`, `DagGraph` in the `tui` module) and removes nothing;
+existing configs, API clients, and scripts keep working unchanged.
+
+Two CLI behaviours moved in the direction you'd expect: `-h` on a subcommand
+now exits 0 instead of 1, and `revoke-api-key` asks for confirmation — but
+only on an interactive terminal, so automation is unaffected.
+
+### Added
+- **TUI: DAG tab** — dependency chains listed with a live status column; `enter` renders the graph in the terminal as status-colored boxes and connectors (layered layout, double border on the root), with an indented tree fallback for graphs too large or wide to draw (`g`/`t` toggles). Selecting a node opens its job detail
+- **TUI: drill-downs everywhere** — `enter` on a queue lists its recent jobs across every status, on a failed job opens a scrollable detail (full error, pretty-printed color-coded payload), on a cron entry shows its trigger history; every job list drills into the same detail view
+- **TUI: job actions and search** — `d` deletes a job (Failed tab and job detail), `/` filters any job list by ID with a live match count; every mutating action (pause, retry, delete, trigger, enable/disable) now asks an inline `[y/N]` confirmation
+- **TUI: `?` help overlay** and a header connection indicator (green live / amber stale / red unreachable)
+
+### Changed
+- **CLI output redesigned** — aligned single-column help with section headers and version banner, `✓`/`✗`/`⚠` result markers, generated API keys highlighted with a "store this key now" warning, `revoke-api-key` confirms on a terminal, interactive password prompts marked with `?`. Color is TTY-gated: piped output stays plain, `NO_COLOR` is honored, and machine-readable commands (`hash-password`, `generate-api-key`) are untouched. `-h` on a subcommand now exits 0
+- **TUI restyled** — teal accent matching the dashboard, adaptive colors for light and dark terminals, full status coverage (all eight job statuses plus worker active/stale), zero counts muted to `·`, full-width cursor bar with a `▌` gutter, heartbeat staleness coloring, human-readable cron schedules, and timestamps that carry the date when not from today
+- **Dashboard redesigned** — a new visual system across every page: dual theme (dark/light, follows the OS preference with an in-app toggle), status pills consistent on all pages, grouped sidebar navigation with icons and live count badges, per-page polling indicator, stat-card groups on the overview with a compact runtime strip, theme-aware chart and DAG graph colors, a job-detail timeline with a two-column layout and header actions, queue-detail status filter as a segmented control with pause/empty actions, a DLQ bulk-selection bar with severity stripes, and human-readable cron schedules next to the raw expression. Embedded dashboard `VERSION` bumped to 0.2.0
+
+### Fixed
+- **TUI: error feedback rendered green** — action failures went through the success style; errors are now red
+- **TUI: unstyled statuses** — `active`, `deferred`, `canceled`, and worker states had no color case and fell through as bare text; every status now renders styled, with a muted fallback for unknown values
+- **TUI: width math counted bytes, not runes** — box-drawing characters (3 bytes each) shifted layout and the help bar could split a multi-byte rune at narrow widths; all width and truncation math is now rune-based
+- **Dashboard: job-detail actions could fire once per page visit** — the click delegation was attached to the persistent app container, so every visit stacked another listener; one Delete click then sent repeated requests and stacked confirm dialogs. Delegation now binds to an element recreated on each render
+- **Dashboard: assorted long-standing UI defects** — pagination click handlers re-attached on every poll (queue detail, DLQ), DLQ poll timers stacking when switching queues, jobs-by-status loading twice on entry, the session-expired message never appearing on the login page, the `warning` toast having no style, and the DAG page referencing CSS classes that did not exist
+
 ## [0.3.1] — 2026-08-01
 
 A single fix for a memory leak that has been present since retention shipped in

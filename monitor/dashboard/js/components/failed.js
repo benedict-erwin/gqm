@@ -12,26 +12,36 @@ GQM.pages.failed = {
 
     render: function(container) {
         GQM.pages.failed.searchFilter = '';
+        GQM.pages.failed.selectedQueue = '';
+        GQM.pages.failed.selectedJobs = [];
 
         container.innerHTML =
-            '<div class="page-header"><h2>Failed / Dead Letter</h2></div>' +
+            GQM.utils.pageHead({
+                title: 'Failed / Dead letter',
+                sub: 'Inspect, retry, or discard jobs that exhausted retries',
+                poll: '15s'
+            }) +
             '<div class="filter-bar">' +
             '<div class="filter-group">' +
-            '<label>Queue:</label>' +
+            '<label for="dlq-queue-select">Queue</label>' +
             '<select id="dlq-queue-select">' +
             '<option value="">Select queue...</option>' +
             '</select>' +
             '</div>' +
             '<div class="filter-group">' +
-            '<label>Search job ID:</label>' +
+            '<label for="dlq-job-filter">Search</label>' +
             '<input type="text" id="dlq-job-filter" placeholder="Filter by job ID..." autocomplete="off">' +
             '</div>' +
+            '<div class="bar-right" id="dlq-queue-actions" style="display:none">' +
+            '<button class="btn btn--sm" data-action="retry-all">Retry all</button>' +
+            '<button class="btn btn--sm btn--danger" data-action="clear-all">Clear all</button>' +
             '</div>' +
-            '<div id="dlq-bulk-actions" class="btn-group mb-2" style="display:none">' +
-            '<button class="btn btn--sm btn--primary" data-action="bulk-retry">Retry Selected</button>' +
-            '<button class="btn btn--sm btn--danger" data-action="bulk-delete">Delete Selected</button>' +
-            '<button class="btn btn--sm" data-action="retry-all">Retry All</button>' +
-            '<button class="btn btn--sm btn--danger" data-action="clear-all">Clear All</button>' +
+            '</div>' +
+            '<div id="dlq-bulk-bar" class="bulk-bar">' +
+            '<b><span id="dlq-selected-count">0</span> selected</b>' +
+            '<div class="spacer"></div>' +
+            '<button class="btn btn--sm btn--primary" data-action="bulk-retry">Retry selected</button>' +
+            '<button class="btn btn--sm btn--danger" data-action="bulk-delete">Delete selected</button>' +
             '</div>' +
             '<div id="dlq-table" class="table-wrap"><div class="empty-state"><p>Select a queue to view dead letter jobs</p></div></div>' +
             '<div id="dlq-pagination"></div>';
@@ -44,8 +54,8 @@ GQM.pages.failed = {
             });
         }
 
-        // Bulk action buttons delegation
-        document.getElementById('dlq-bulk-actions').addEventListener('click', function(e) {
+        // Action buttons delegation (queue-wide + bulk)
+        var onAction = function(e) {
             var btn = e.target.closest('[data-action]');
             if (!btn) return;
             var action = btn.getAttribute('data-action');
@@ -53,7 +63,9 @@ GQM.pages.failed = {
             else if (action === 'bulk-delete') GQM.pages.failed.bulkDelete();
             else if (action === 'retry-all') GQM.pages.failed.retryAll();
             else if (action === 'clear-all') GQM.pages.failed.clearAll();
-        });
+        };
+        document.getElementById('dlq-queue-actions').addEventListener('click', onAction);
+        document.getElementById('dlq-bulk-bar').addEventListener('click', onAction);
 
         // Checkbox delegation on DLQ table
         document.getElementById('dlq-table').addEventListener('change', function(e) {
@@ -63,6 +75,15 @@ GQM.pages.failed = {
                 GQM.pages.failed.toggleAll(cb);
             } else if (cb.getAttribute('data-id')) {
                 GQM.pages.failed.toggleJob(cb);
+            }
+        });
+
+        // Pagination — attached once; loadDLQ only rewrites the innerHTML.
+        document.getElementById('dlq-pagination').addEventListener('click', function(e) {
+            var btn = e.target.closest('[data-page]');
+            if (btn && !btn.disabled) {
+                GQM.pages.failed.currentPage = parseInt(btn.getAttribute('data-page'));
+                GQM.pages.failed.loadDLQ();
             }
         });
 
@@ -93,13 +114,28 @@ GQM.pages.failed = {
         GQM.pages.failed.selectedQueue = name;
         GQM.pages.failed.selectedJobs = [];
         GQM.pages.failed.currentPage = 1;
+        GQM.pages.failed.updateBulkBar();
+        // Clear any poll from a previously selected queue so the timers
+        // don't stack when the user switches queues.
+        GQM.app.stopPolling();
+        var actions = document.getElementById('dlq-queue-actions');
         if (name) {
-            document.getElementById('dlq-bulk-actions').style.display = '';
+            if (actions) actions.style.display = '';
             GQM.app.poll(function() { GQM.pages.failed.loadDLQ(); }, 15000);
         } else {
-            document.getElementById('dlq-bulk-actions').style.display = 'none';
-            document.getElementById('dlq-table').innerHTML = '<div class="empty-state"><p>Select a queue</p></div>';
+            if (actions) actions.style.display = 'none';
+            document.getElementById('dlq-table').innerHTML =
+                '<div class="empty-state"><p>Select a queue to view dead letter jobs</p></div>';
+            document.getElementById('dlq-pagination').innerHTML = '';
         }
+    },
+
+    updateBulkBar: function() {
+        var n = GQM.pages.failed.selectedJobs.length;
+        var bar = document.getElementById('dlq-bulk-bar');
+        var count = document.getElementById('dlq-selected-count');
+        if (count) count.textContent = String(n);
+        if (bar) bar.classList.toggle('on', n > 0);
     },
 
     loadDLQ: function() {
@@ -121,32 +157,26 @@ GQM.pages.failed = {
 
             var rows = jobs.map(function(j) {
                 var checked = GQM.pages.failed.selectedJobs.indexOf(j.id) >= 0 ? ' checked' : '';
-                return '<tr data-job-id="' + GQM.utils.escapeHTML(j.id).toLowerCase() + '">' +
-                    '<td class="checkbox-col"><input type="checkbox" data-id="' + GQM.utils.escapeHTML(j.id) + '"' + checked + '></td>' +
+                var err = GQM.utils.escapeHTML(j.error || '');
+                return '<tr class="row-stripe" data-job-id="' + GQM.utils.escapeHTML(j.id).toLowerCase() + '">' +
+                    '<td class="checkbox-col"><input type="checkbox" data-id="' + GQM.utils.escapeHTML(j.id) + '"' + checked + ' aria-label="Select job"></td>' +
                     '<td class="mono truncate"><a href="#/jobs/' + GQM.utils.escapeHTML(j.id) + '">' + GQM.utils.escapeHTML(j.id) + '</a></td>' +
                     '<td>' + GQM.utils.escapeHTML(j.type || '') + '</td>' +
-                    '<td>' + GQM.utils.escapeHTML(j.error || '') + '</td>' +
-                    '<td>' + (j.retry_count || 0) + '/' + (j.max_retry || 0) + '</td>' +
-                    '<td>' + GQM.utils.formatTime(j.created_at) + '</td>' +
+                    (err ? '<td class="err-cell" title="' + err + '">' + err + '</td>' : '<td class="dim">—</td>') +
+                    '<td class="num mono">' + (j.retry_count || 0) + ' / ' + (j.max_retry || 0) + '</td>' +
+                    '<td class="dim">' + GQM.utils.formatTime(j.created_at) + '</td>' +
                     '</tr>';
             }).join('');
 
             el.innerHTML =
                 '<table><thead><tr>' +
-                '<th class="checkbox-col"><input type="checkbox" data-action="toggle-all"></th>' +
-                '<th>Job ID</th><th>Type</th><th>Error</th><th>Retries</th><th>Created</th>' +
+                '<th class="checkbox-col"><input type="checkbox" data-action="toggle-all" aria-label="Select all"></th>' +
+                '<th>Job</th><th>Type</th><th>Error</th><th class="num">Retries</th><th>Created</th>' +
                 '</tr></thead><tbody>' + rows + '</tbody></table>';
 
             var pagEl = document.getElementById('dlq-pagination');
             if (pagEl) {
                 pagEl.innerHTML = GQM.utils.paginationHTML(meta.page || 1, meta.limit || 20, meta.total || 0);
-                pagEl.addEventListener('click', function(e) {
-                    var btn = e.target.closest('[data-page]');
-                    if (btn && !btn.disabled) {
-                        GQM.pages.failed.currentPage = parseInt(btn.getAttribute('data-page'));
-                        GQM.pages.failed.loadDLQ();
-                    }
-                });
             }
 
             GQM.pages.jobs.applyFilter('dlq-table', GQM.pages.failed.searchFilter);
@@ -164,6 +194,7 @@ GQM.pages.failed = {
         } else if (!checkbox.checked && idx >= 0) {
             GQM.pages.failed.selectedJobs.splice(idx, 1);
         }
+        GQM.pages.failed.updateBulkBar();
     },
 
     toggleAll: function(checkbox) {
@@ -175,6 +206,7 @@ GQM.pages.failed = {
                 GQM.pages.failed.selectedJobs.push(cb.getAttribute('data-id'));
             }
         });
+        GQM.pages.failed.updateBulkBar();
     },
 
     bulkRetry: function() {
@@ -184,6 +216,7 @@ GQM.pages.failed = {
             var d = resp.data || {};
             GQM.utils.toast('Retried ' + (d.succeeded || 0) + ' jobs', 'success');
             GQM.pages.failed.selectedJobs = [];
+            GQM.pages.failed.updateBulkBar();
             GQM.pages.failed.loadDLQ();
         }).catch(function(err) { GQM.utils.toast(err.message, 'error'); });
     },
@@ -197,6 +230,7 @@ GQM.pages.failed = {
                 var d = resp.data || {};
                 GQM.utils.toast('Deleted ' + (d.succeeded || 0) + ' jobs', 'success');
                 GQM.pages.failed.selectedJobs = [];
+                GQM.pages.failed.updateBulkBar();
                 GQM.pages.failed.loadDLQ();
             }).catch(function(err) { GQM.utils.toast(err.message, 'error'); });
         });
@@ -221,6 +255,8 @@ GQM.pages.failed = {
             GQM.api.del('/api/v1/queues/' + encodeURIComponent(q) + '/dead-letter/clear').then(function(resp) {
                 var d = resp.data || {};
                 GQM.utils.toast('Cleared ' + (d.cleared || 0) + ' jobs', 'success');
+                GQM.pages.failed.selectedJobs = [];
+                GQM.pages.failed.updateBulkBar();
                 GQM.pages.failed.loadDLQ();
             }).catch(function(err) { GQM.utils.toast(err.message, 'error'); });
         });

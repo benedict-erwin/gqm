@@ -9,7 +9,14 @@ GQM.pages.login = {
         container.innerHTML =
             '<div class="login-container">' +
             '<div class="login-box">' +
-            '<h1>GQM</h1>' +
+            '<div class="login-brand">' +
+            '<div class="brand-mark">' +
+            '<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#08211c" stroke-width="2" stroke-linecap="round">' +
+            '<path d="M2 4h9M2 8h12M2 12h7"/><circle cx="13.5" cy="4" r="1.4" fill="#08211c" stroke="none"/>' +
+            '</svg>' +
+            '</div>' +
+            '<div><span class="name">GQM</span><span class="tagline">Go Queue Manager</span></div>' +
+            '</div>' +
             '<div id="login-error" class="login-error"></div>' +
             '<form id="login-form">' +
             '<div class="form-group">' +
@@ -20,8 +27,9 @@ GQM.pages.login = {
             '<label for="password">Password</label>' +
             '<input type="password" id="password" name="password" autocomplete="current-password" required>' +
             '</div>' +
-            '<button type="submit" class="btn btn--primary" id="login-btn">Sign In</button>' +
+            '<button type="submit" class="btn btn--primary" id="login-btn">Sign in</button>' +
             '</form>' +
+            '<div class="login-footer">GQM Dashboard</div>' +
             '</div>' +
             '</div>';
 
@@ -35,7 +43,7 @@ GQM.pages.login = {
 
             if (!username || !password) {
                 errorEl.textContent = 'Please enter username and password';
-                errorEl.style.display = '';
+                errorEl.style.display = 'block';
                 return;
             }
 
@@ -47,9 +55,9 @@ GQM.pages.login = {
                 GQM.app.onLoginSuccess(data.data || { username: username });
             }).catch(function(err) {
                 errorEl.textContent = err.message || 'Login failed';
-                errorEl.style.display = '';
+                errorEl.style.display = 'block';
                 btn.disabled = false;
-                btn.textContent = 'Sign In';
+                btn.textContent = 'Sign in';
             });
         });
 

@@ -43,6 +43,9 @@ Flags:`)
 	}
 
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 1
 	}
 
@@ -55,7 +58,7 @@ Flags:`)
 	}
 
 	if err := validateTUIArgs(*apiURL); err != nil {
-		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		errLine(stderr, "%v", err)
 		fs.Usage()
 		return 1
 	}
@@ -64,12 +67,12 @@ Flags:`)
 
 	// Quick health check before launching TUI.
 	if err := client.Health(); err != nil {
-		fmt.Fprintf(stderr, "gqm: cannot connect to %s: %v\n", *apiURL, err)
+		errLine(stderr, "cannot connect to %s: %v", *apiURL, err)
 		return 1
 	}
 
 	if err := tui.Run(client); err != nil {
-		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		errLine(stderr, "%v", err)
 		return 1
 	}
 	return 0

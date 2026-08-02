@@ -84,7 +84,7 @@ func TestRunInit_Valid(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Config file created") {
 		t.Error("expected success message on stdout")
 	}
-	if !strings.Contains(stdout.String(), "Next steps") {
+	if !strings.Contains(stdout.String(), "NEXT STEPS") {
 		t.Error("expected next steps on stdout")
 	}
 

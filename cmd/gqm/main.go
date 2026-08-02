@@ -40,6 +40,7 @@ func init() {
 }
 
 func main() {
+	initStyling()
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
@@ -73,35 +74,45 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printUsage(stdout)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "gqm: unknown command %q\n\n", args[0])
-		printUsage(stderr)
+		errLine(stderr, "unknown command %q", args[0])
+		fmt.Fprintf(stderr, "  %s %s %s\n",
+			muted(stderr, "Run"), accent(stderr, "gqm help"), muted(stderr, "for available commands."))
 		return 1
 	}
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprint(w, `GQM — Go Queue Manager CLI
+	cmd := func(name, desc string) string {
+		return fmt.Sprintf("  %s   %s\n", accent(w, fmt.Sprintf("%-16s", name)), desc)
+	}
+	fmt.Fprintf(w, "%s — Go Queue Manager %s\n\n",
+		paint(w, ansiBold+ansiCyan, "GQM"), muted(w, "v"+version))
+	fmt.Fprintf(w, "%s\n", sectionHeader(w, "USAGE"))
+	fmt.Fprintf(w, "  gqm %s [flags]\n\n", accent(w, "<command>"))
 
-Usage:
-  gqm <command> [arguments]
+	fmt.Fprintf(w, "%s\n", sectionHeader(w, "SETUP"))
+	fmt.Fprint(w, cmd("init", "Generate a config file "+muted(w, "(default: gqm.yaml)")))
+	fmt.Fprintln(w)
 
-Setup:
-  init [--config <file>]                            Generate a config file (default: gqm.yaml)
+	fmt.Fprintf(w, "%s\n", sectionHeader(w, "CONFIG"))
+	fmt.Fprint(w, cmd("set-password", "Set or update a user password "+muted(w, "(interactive)")))
+	fmt.Fprint(w, cmd("reset-password", "Alias for set-password"))
+	fmt.Fprint(w, cmd("add-api-key", "Generate and add an API key"))
+	fmt.Fprint(w, cmd("revoke-api-key", "Remove an API key"))
+	fmt.Fprintln(w)
 
-Config Management:
-  set-password --config <file> --user <username>    Set or update a user password
-  reset-password                                    Alias for set-password
-  add-api-key --config <file> --name <name>         Generate and add an API key
-  revoke-api-key --config <file> --name <name>      Remove an API key
+	fmt.Fprintf(w, "%s\n", sectionHeader(w, "UTILITIES"))
+	fmt.Fprint(w, cmd("dashboard export", "Export embedded dashboard files"))
+	fmt.Fprint(w, cmd("hash-password", "Bcrypt hash to stdout "+muted(w, "(pipe-safe)")))
+	fmt.Fprint(w, cmd("generate-api-key", "API key to stdout "+muted(w, "(pipe-safe)")))
+	fmt.Fprintln(w)
 
-Utilities:
-  dashboard export <dir>   Export embedded dashboard files to a directory
-  hash-password <password> Generate bcrypt hash to stdout
-  generate-api-key         Generate API key to stdout
+	fmt.Fprintf(w, "%s\n", sectionHeader(w, "OTHER"))
+	fmt.Fprint(w, cmd("tui", "Launch the terminal UI monitor"))
+	fmt.Fprint(w, cmd("version", "Print the GQM version"))
+	fmt.Fprint(w, cmd("help", "Show this help"))
+	fmt.Fprintln(w)
 
-Other:
-  tui                      Launch the terminal UI monitor
-  version                  Print the GQM version
-  help                     Show this help message
-`)
+	fmt.Fprintf(w, "%s gqm %s -h %s\n",
+		muted(w, "Run"), accent(w, "<command>"), muted(w, "for details on a command."))
 }

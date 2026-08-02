@@ -7,8 +7,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const restartNotice = "\n⚠  Restart your GQM server for changes to take effect.\n"
-
 // loadConfigNode reads a YAML config file into a yaml.Node tree,
 // preserving comments and formatting.
 func loadConfigNode(path string) (*yaml.Node, error) {

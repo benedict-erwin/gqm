@@ -27,7 +27,7 @@ Use the output in your GQM config file for auth.users[].password_hash.`)
 
 	hash, err := hashPassword(args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		errLine(stderr, "%v", err)
 		return 1
 	}
 

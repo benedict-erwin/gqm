@@ -15,12 +15,20 @@ GQM.pages.queues = {
         GQM.pages.queues.poolFilter = poolName;
         GQM.pages.queues.poolQueues = null;
 
-        var header = '<div class="page-header"><h2>Queues</h2></div>';
+        var header;
         if (poolName) {
-            header = '<div class="page-header">' +
-                '<h2>Queues &mdash; ' + GQM.utils.escapeHTML(poolName) + '</h2>' +
-                '<a href="#/queues" class="btn btn--sm">Show all queues</a>' +
-                '</div>';
+            header = GQM.utils.pageHead({
+                title: 'Queues &mdash; ' + GQM.utils.escapeHTML(poolName),
+                sub: 'Filtered to one pool',
+                poll: '10s',
+                right: '<a href="#/queues" class="btn btn--sm">Show all queues</a>'
+            });
+        } else {
+            header = GQM.utils.pageHead({
+                title: 'Queues',
+                sub: 'Current depth and lifetime totals per queue',
+                poll: '10s'
+            });
         }
 
         container.innerHTML =
@@ -88,34 +96,39 @@ GQM.pages.queues = {
 
             var rows = queues.map(function(q) {
                 var pausedBadge = q.paused ? ' ' + GQM.utils.statusBadge('paused') : '';
+                var dlqCell = q.dead_letter > 0
+                    ? '<td class="num emph">' + q.dead_letter + '</td>'
+                    : '<td class="num">' + q.dead_letter + '</td>';
                 return '<tr>' +
                     '<td><a href="#/queues/' + GQM.utils.escapeHTML(q.name) + '">' + GQM.utils.escapeHTML(q.name) + '</a>' + pausedBadge + '</td>' +
-                    '<td>' + q.ready + '</td>' +
-                    '<td>' + q.processing + '</td>' +
-                    '<td>' + q.completed + '</td>' +
-                    '<td>' + q.dead_letter + '</td>' +
-                    '<td>' + GQM.utils.formatNumber(q.processed_total) + '</td>' +
-                    '<td>' + GQM.utils.formatNumber(q.failed_total) + '</td>' +
-                    '<td class="btn-group">' +
+                    '<td class="num">' + q.ready + '</td>' +
+                    '<td class="num">' + q.processing + '</td>' +
+                    '<td class="num">' + q.completed + '</td>' +
+                    dlqCell +
+                    '<td class="num dim">' + GQM.utils.formatNumber(q.processed_total) + '</td>' +
+                    '<td class="num dim">' + GQM.utils.formatNumber(q.failed_total) + '</td>' +
+                    '<td class="actions-cell"><div class="btn-group btn-group--right">' +
                     (q.paused
                         ? '<button class="btn btn--sm" data-action="resume" data-queue="' + GQM.utils.escapeHTML(q.name) + '">Resume</button>'
                         : '<button class="btn btn--sm" data-action="pause" data-queue="' + GQM.utils.escapeHTML(q.name) + '">Pause</button>') +
                     '<button class="btn btn--sm btn--danger" data-action="empty" data-queue="' + GQM.utils.escapeHTML(q.name) + '">Empty</button>' +
-                    '</td>' +
+                    '</div></td>' +
                     '</tr>';
             }).join('');
 
             el.innerHTML =
                 '<table><thead>' +
                 '<tr class="thead-group">' +
-                '<th rowspan="2">Queue</th>' +
-                '<th colspan="4" class="col-group-bordered">Current</th>' +
-                '<th colspan="2" class="col-group-bordered">Cumulative</th>' +
-                '<th rowspan="2">Actions</th>' +
+                '<th class="spacer"></th>' +
+                '<th colspan="4">Current</th>' +
+                '<th colspan="2">Cumulative</th>' +
+                '<th class="spacer"></th>' +
                 '</tr><tr>' +
-                '<th class="col-group-left">Ready</th><th>Processing</th><th>Completed</th><th>Dead Letter</th>' +
-                '<th class="col-group-left" data-tooltip="Lifetime total of all successfully processed jobs">Processed</th>' +
-                '<th class="col-group-right" data-tooltip="Lifetime total of all failed jobs">Failed</th>' +
+                '<th>Queue</th>' +
+                '<th class="num">Ready</th><th class="num">Processing</th><th class="num">Completed</th><th class="num">Dead letter</th>' +
+                '<th class="num" data-tooltip="Lifetime total of all successfully processed jobs">Processed</th>' +
+                '<th class="num" data-tooltip="Lifetime total of all failed jobs">Failed</th>' +
+                '<th class="actions-col">Actions</th>' +
                 '</tr></thead><tbody>' + rows + '</tbody></table>';
         }).catch(function(err) {
             var el = document.getElementById('queues-table');

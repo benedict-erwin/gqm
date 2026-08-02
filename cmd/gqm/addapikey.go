@@ -28,6 +28,9 @@ Flags:`)
 	}
 
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 1
 	}
 
@@ -37,25 +40,26 @@ Flags:`)
 	}
 
 	if *role != "admin" && *role != "viewer" {
-		fmt.Fprintf(stderr, "gqm: invalid role %q (must be admin or viewer)\n", *role)
+		errLine(stderr, "invalid role %q (must be admin or viewer)", *role)
 		return 1
 	}
 
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
-		fmt.Fprintf(stderr, "gqm: generating key: %v\n", err)
+		errLine(stderr, "generating key: %v", err)
 		return 1
 	}
 	key := "gqm_ak_" + hex.EncodeToString(b)
 
 	if err := injectAPIKey(*configPath, *name, key, *role); err != nil {
-		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		errLine(stderr, "%v", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "API key added for %q in %s\n", *name, *configPath)
-	fmt.Fprintf(stdout, "Key: %s\n", key)
-	fmt.Fprint(stdout, restartNotice)
+	okLine(stdout, "API key added for %q in %s", *name, *configPath)
+	keyBlock(stdout, key)
+	warnLine(stdout, "Store this key now — it is not shown again after this.")
+	warnLine(stdout, "Restart your GQM server for changes to take effect.")
 	return 0
 }
 

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -107,6 +109,20 @@ func (j Job) str(key string) string {
 	return ""
 }
 
+// floatStr returns the raw value under key as a decimal string, preserving
+// fractions that str() would round away.
+func (j Job) floatStr(key string) string {
+	if v, ok := j[key]; ok {
+		switch t := v.(type) {
+		case string:
+			return t
+		case float64:
+			return strconv.FormatFloat(t, 'f', -1, 64)
+		}
+	}
+	return ""
+}
+
 func (j Job) int64val(key string) int64 {
 	if v, ok := j[key]; ok {
 		switch t := v.(type) {
@@ -152,7 +168,7 @@ func (c *Client) ListCron() ([]CronEntry, error) {
 
 // ListQueueJobs fetches jobs from a queue with optional status filter.
 func (c *Client) ListQueueJobs(queue, status string) ([]Job, error) {
-	path := fmt.Sprintf("/api/v1/queues/%s/jobs?status=%s", queue, status)
+	path := fmt.Sprintf("/api/v1/queues/%s/jobs?status=%s&page=1&limit=50", queue, status)
 	var jobs []Job
 	if err := c.get(path, &jobs); err != nil {
 		return nil, err
@@ -201,6 +217,93 @@ func (c *Client) DisableCron(id string) error {
 	return c.post(fmt.Sprintf("/api/v1/cron/%s/disable", id))
 }
 
+// DeleteJob permanently deletes a job.
+func (c *Client) DeleteJob(jobID string) error {
+	return c.del(fmt.Sprintf("/api/v1/jobs/%s", jobID))
+}
+
+// ListCronHistory fetches recent trigger records for a cron entry.
+// Each record is {job_id, triggered_at}.
+func (c *Client) ListCronHistory(id string) ([]Job, error) {
+	var records []Job
+	if err := c.get(fmt.Sprintf("/api/v1/cron/%s/history?limit=20", id), &records); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// ListQueueJobsMerged fetches recent jobs across every status for a queue,
+// merged and sorted newest first — the TUI's queue drill-down.
+func (c *Client) ListQueueJobsMerged(queue string) ([]Job, error) {
+	statuses := []string{"ready", "processing", "completed", "dead_letter"}
+	var all []Job
+	for _, s := range statuses {
+		jobs, err := c.ListQueueJobs(queue, s)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, jobs...)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].int64val("created_at") > all[j].int64val("created_at")
+	})
+	if len(all) > 100 {
+		all = all[:100]
+	}
+	return all, nil
+}
+
+// GetJob fetches a single job by ID.
+func (c *Client) GetJob(id string) (Job, error) {
+	var job Job
+	if err := c.get("/api/v1/jobs/"+id, &job); err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+// DagNode is one node in a dependency graph.
+type DagNode struct {
+	ID           string `json:"id"`
+	Type         string `json:"type,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Queue        string `json:"queue,omitempty"`
+	AllowFailure bool   `json:"allow_failure"`
+	CreatedAt    string `json:"created_at,omitempty"`
+}
+
+// DagEdge is a dependency edge: Source must finish before Target runs.
+type DagEdge struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+// DagGraph is the dependency graph rooted at a job.
+type DagGraph struct {
+	RootID    string    `json:"root_id"`
+	Nodes     []DagNode `json:"nodes"`
+	Edges     []DagEdge `json:"edges"`
+	Truncated bool      `json:"truncated"`
+}
+
+// ListDAGRoots fetches parent jobs that have dependents.
+func (c *Client) ListDAGRoots() ([]Job, error) {
+	var jobs []Job
+	if err := c.get("/api/v1/dag/roots?page=1&limit=50", &jobs); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+// GetDAGGraph fetches the dependency graph rooted at the given job.
+func (c *Client) GetDAGGraph(id string) (*DagGraph, error) {
+	var g DagGraph
+	if err := c.get("/api/v1/dag/graph/"+id+"?depth=10&max_nodes=50", &g); err != nil {
+		return nil, err
+	}
+	return &g, nil
+}
+
 // Health checks API connectivity.
 func (c *Client) Health() error {
 	return c.get("/health", nil)
@@ -241,6 +344,32 @@ func (c *Client) get(path string, result any) error {
 	}
 	if err := json.Unmarshal(envelope.Data, result); err != nil {
 		return fmt.Errorf("decoding data: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) del(path string) error {
+	req, err := http.NewRequest("DELETE", c.baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("unauthorized (check API key)")
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("API error %d (failed to read body: %w)", resp.StatusCode, err)
+		}
+		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
 }
