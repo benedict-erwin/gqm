@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] — 2026-08-02
+
+A user-interface release: every surface you look at — web dashboard, CLI
+output, and the terminal UI — was redesigned around one visual language.
+Nothing in the queue engine changed. The public Go API gains three types
+(`DagNode`, `DagEdge`, `DagGraph` in the `tui` module) and removes nothing;
+existing configs, API clients, and scripts keep working unchanged.
+
+Two CLI behaviours moved in the direction you'd expect: `-h` on a subcommand
+now exits 0 instead of 1, and `revoke-api-key` asks for confirmation — but
+only on an interactive terminal, so automation is unaffected.
 
 ### Added
 - **TUI: DAG tab** — dependency chains listed with a live status column; `enter` renders the graph in the terminal as status-colored boxes and connectors (layered layout, double border on the root), with an indented tree fallback for graphs too large or wide to draw (`g`/`t` toggles). Selecting a node opens its job detail
