@@ -131,8 +131,8 @@ func (t *table) allocWidths() []int {
 }
 
 var (
-	headerText     = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
-	separatorStyle = lipgloss.NewStyle().Foreground(colorMuted)
+	headerText     = lipgloss.NewStyle().Bold(true).Foreground(colorSecondary)
+	separatorStyle = lipgloss.NewStyle().Foreground(colorDim)
 	scrollStyle    = lipgloss.NewStyle().Foreground(colorMuted)
 )
 
@@ -183,7 +183,9 @@ func (t *table) render(cursor, maxRows int) string {
 
 	var b strings.Builder
 
-	// Header line
+	// Header line. Every line carries a 1-cell gutter so the cursor bar on the
+	// selected row doesn't shift column alignment.
+	b.WriteString(" ")
 	for i, c := range t.cols {
 		cell := fmt.Sprintf("%-*s", alloc[i], c.header)
 		b.WriteString(headerText.Render(cell))
@@ -194,6 +196,7 @@ func (t *table) render(cursor, maxRows int) string {
 	b.WriteString("\n")
 
 	// Separator
+	b.WriteString(" ")
 	for i, w := range alloc {
 		b.WriteString(separatorStyle.Render(strings.Repeat("─", w)))
 		if i < len(alloc)-1 {
@@ -233,9 +236,17 @@ func (t *table) render(cursor, maxRows int) string {
 		}
 		s := line.String()
 		if ri == cursor {
-			s = selectedRow.Render(s)
+			// Cursor bar gutter + highlight padded to the full terminal width,
+			// so the selection reads as a bar rather than a ragged tint.
+			if t.maxWidth > 0 {
+				if pad := t.maxWidth - 1 - visibleLen(s); pad > 0 {
+					s += strings.Repeat(" ", pad)
+				}
+			}
+			b.WriteString(cursorBar.Render("▌") + selectedRow.Render(s))
+		} else {
+			b.WriteString(" " + s)
 		}
-		b.WriteString(s)
 		b.WriteString("\n")
 	}
 
@@ -248,9 +259,11 @@ func (t *table) render(cursor, maxRows int) string {
 	return b.String()
 }
 
-// visibleLen returns the visible length of s, ignoring ANSI escape sequences.
+// visibleLen returns the visible length of s in runes, ignoring ANSI escape
+// sequences. Runes, not bytes: box-drawing characters are 3 bytes each, and
+// byte counting shifted every layout that mixed them with padding math.
 func visibleLen(s string) int {
-	return len(stripAnsi(s))
+	return len([]rune(stripAnsi(s)))
 }
 
 // stripAnsi removes ANSI escape sequences for width calculation.

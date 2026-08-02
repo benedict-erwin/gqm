@@ -24,6 +24,9 @@ Flags:`)
 	}
 
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 1
 	}
 
@@ -32,13 +35,20 @@ Flags:`)
 		return 1
 	}
 
-	if err := removeAPIKey(*configPath, *name); err != nil {
-		fmt.Fprintf(stderr, "gqm: %v\n", err)
+	// Destructive: ask first on a terminal. Non-interactive callers (scripts,
+	// pipes) proceed unprompted, matching the previous behavior.
+	if !confirmPrompt(fmt.Sprintf("Revoke API key %q?", *name)) {
+		fmt.Fprintln(stderr, "Canceled.")
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "API key %q revoked from %s\n", *name, *configPath)
-	fmt.Fprint(stdout, restartNotice)
+	if err := removeAPIKey(*configPath, *name); err != nil {
+		errLine(stderr, "%v", err)
+		return 1
+	}
+
+	okLine(stdout, "API key %q revoked from %s", *name, *configPath)
+	restartWarning(stdout)
 	return 0
 }
 

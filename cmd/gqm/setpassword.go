@@ -33,6 +33,9 @@ Flags:`)
 	}
 
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 1
 	}
 
@@ -43,40 +46,41 @@ Flags:`)
 
 	password, err := passwordReader()
 	if err != nil {
-		fmt.Fprintf(stderr, "gqm: reading password: %v\n", err)
+		errLine(stderr, "reading password: %v", err)
 		return 1
 	}
 
 	if strings.TrimSpace(password) == "" {
-		fmt.Fprintln(stderr, "gqm: password must not be empty")
+		errLine(stderr, "password must not be empty")
 		return 1
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		fmt.Fprintf(stderr, "gqm: hashing password: %v\n", err)
+		errLine(stderr, "hashing password: %v", err)
 		return 1
 	}
 
 	if err := injectPassword(*configPath, *username, string(hash)); err != nil {
-		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		errLine(stderr, "%v", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Password updated for user %q in %s\n", *username, *configPath)
-	fmt.Fprint(stdout, restartNotice)
+	okLine(stdout, "Password updated for user %q in %s", *username, *configPath)
+	restartWarning(stdout)
 	return 0
 }
 
 func promptPassword() (string, error) {
-	fmt.Fprint(os.Stderr, "Enter password: ")
+	q := paint(os.Stderr, ansiCyan+ansiBold, "?")
+	fmt.Fprintf(os.Stderr, "%s Enter password: ", q)
 	p1, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		return "", err
 	}
 
-	fmt.Fprint(os.Stderr, "Confirm password: ")
+	fmt.Fprintf(os.Stderr, "%s Confirm password: ", q)
 	p2, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Fprintln(os.Stderr)
 	if err != nil {

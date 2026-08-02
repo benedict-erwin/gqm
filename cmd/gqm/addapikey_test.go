@@ -90,7 +90,7 @@ func TestRunAddAPIKey_Valid(t *testing.T) {
 	if !strings.Contains(stdout.String(), "API key added") {
 		t.Error("expected success message")
 	}
-	if !strings.Contains(stdout.String(), "Key: gqm_ak_") {
+	if !strings.Contains(stdout.String(), "gqm_ak_") {
 		t.Error("expected key output")
 	}
 	if !strings.Contains(stdout.String(), "Restart") {

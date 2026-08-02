@@ -23,11 +23,11 @@ The directory will be created if it does not exist.`)
 	targetDir := args[1]
 
 	if err := exportDashboard(targetDir); err != nil {
-		fmt.Fprintf(stderr, "gqm: export dashboard: %v\n", err)
+		errLine(stderr, "export dashboard: %v", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Dashboard exported to %s\n", targetDir)
+	okLine(stdout, "Dashboard exported to %s", targetDir)
 	return 0
 }
 

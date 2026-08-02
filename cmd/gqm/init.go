@@ -129,20 +129,24 @@ Flags:`)
 	}
 
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 1
 	}
 
 	if err := initConfig(*configPath); err != nil {
-		fmt.Fprintf(stderr, "gqm: %v\n", err)
+		errLine(stderr, "%v", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Config file created: %s\n\n", *configPath)
-	fmt.Fprintln(stdout, "Next steps:")
+	okLine(stdout, "Config file created: %s", *configPath)
+	fmt.Fprintln(stdout)
+	fmt.Fprintf(stdout, "%s\n", sectionHeader(stdout, "NEXT STEPS"))
 	fmt.Fprintln(stdout, "  1. Edit the config file to match your environment")
 	fmt.Fprintln(stdout, "  2. Set up authentication:")
-	fmt.Fprintln(stdout, "       gqm set-password --config "+*configPath+" --user admin")
-	fmt.Fprintln(stdout, "       gqm add-api-key --config "+*configPath+" --name my-key")
+	fmt.Fprintf(stdout, "       %s\n", accent(stdout, "gqm set-password --config "+*configPath+" --user admin"))
+	fmt.Fprintf(stdout, "       %s\n", accent(stdout, "gqm add-api-key  --config "+*configPath+" --name my-key"))
 	fmt.Fprintln(stdout, "  3. Start your GQM server with the config file")
 	return 0
 }

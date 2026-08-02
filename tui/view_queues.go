@@ -1,7 +1,5 @@
 package tui
 
-import "fmt"
-
 type queuesView struct {
 	queues []Queue
 	cursor int
@@ -11,24 +9,24 @@ type queuesView struct {
 func (v *queuesView) render(width, maxRows int) string {
 	t := newTable(width,
 		colDef{header: "QUEUE", flex: true, min: 10},
-		colDef{header: "PAUSED"},
+		colDef{header: "STATE"},
 		colDef{header: "READY"},
 		colDef{header: "PROCESSING"},
 		colDef{header: "COMPLETED"},
 		colDef{header: "DLQ"},
 	)
 	for _, q := range v.queues {
-		paused := ""
+		state := ""
 		if q.Paused {
-			paused = statusPaused.Render("PAUSED")
+			state = statusPaused.Render("PAUSED")
 		}
 		t.addRow(
 			q.Name,
-			paused,
-			statusReady.Render(fmt.Sprintf("%d", q.Ready)),
-			statusProcessing.Render(fmt.Sprintf("%d", q.Processing)),
-			fmt.Sprintf("%d", q.Completed),
-			statusDLQ.Render(fmt.Sprintf("%d", q.DeadLetter)),
+			state,
+			dimZero(q.Ready, statusReady),
+			dimZero(q.Processing, statusProcessing),
+			dimZero(q.Completed, statusCompleted),
+			dimZero(q.DeadLetter, statusDLQ),
 		)
 	}
 	return t.render(v.cursor, maxRows)

@@ -1,7 +1,5 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
-
 type cronView struct {
 	entries []CronEntry
 	cursor  int
@@ -13,25 +11,26 @@ func (v *cronView) render(width, maxRows int) string {
 		colDef{header: "ID", flex: true, min: 8},
 		colDef{header: "NAME", flex: true, min: 10},
 		colDef{header: "EXPRESSION"},
-		colDef{header: "TIMEZONE"},
-		colDef{header: "JOB TYPE", flex: true, min: 8},
+		colDef{header: "SCHEDULE", flex: true, min: 8},
+		colDef{header: "TZ"},
 		colDef{header: "ENABLED"},
 	)
 	for _, e := range v.entries {
-		enabled := statusReady.Render("yes")
+		enabled := statusReady.Render("on")
 		if !e.enabled() {
-			enabled = lipgloss.NewStyle().Foreground(colorMuted).Render("no")
+			enabled = mutedStyle.Render("off")
 		}
 		tz := e.str("timezone")
 		if tz == "" {
 			tz = "UTC"
 		}
+		expr := e.str("cron_expr")
 		t.addRow(
 			e.str("id"),
 			e.str("name"),
-			e.str("cron_expr"),
-			tz,
-			e.str("job_type"),
+			expr,
+			mutedStyle.Render(cronHuman(expr)),
+			mutedStyle.Render(tz),
 			enabled,
 		)
 	}
