@@ -41,6 +41,24 @@ GQM.app = {
             });
         }
 
+        // Theme toggle — persists to localStorage; the inline script in
+        // index.html re-applies it before first paint on the next load.
+        var themeBtn = document.getElementById('theme-toggle');
+        if (themeBtn) {
+            themeBtn.addEventListener('click', function() {
+                var root = document.documentElement;
+                var cur = root.getAttribute('data-theme');
+                var dark = cur ? cur === 'dark'
+                    : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+                var next = dark ? 'light' : 'dark';
+                root.setAttribute('data-theme', next);
+                try { localStorage.setItem('gqm-theme', next); } catch (e) { /* ignore */ }
+                // Re-render the current page so canvas-based charts and the
+                // DAG graph pick up the new theme colors.
+                if (GQM.app.authenticated) GQM.app.route();
+            });
+        }
+
         // Check auth and route
         GQM.api.checkAuth().then(function(data) {
             GQM.app.authenticated = true;
@@ -50,10 +68,33 @@ GQM.app = {
             if (loginPage) loginPage.style.display = 'none';
             document.getElementById('layout').classList.add('visible');
             GQM.app.updateAuthUI();
+            GQM.app.startNavCounts();
             GQM.app.route();
         }).catch(function() {
             GQM.app.showLogin();
         });
+    },
+
+    // Sidebar count badges (queues / workers / DLQ), refreshed on an
+    // independent slow timer that survives route changes.
+    navCountTimer: null,
+    startNavCounts: function() {
+        if (GQM.app.navCountTimer) return;
+        var update = function() {
+            if (document.visibilityState !== 'visible' || !GQM.app.authenticated) return;
+            GQM.api.get('/api/v1/stats').then(function(resp) {
+                var d = resp.data || {};
+                var set = function(id, v) {
+                    var el = document.getElementById(id);
+                    if (el) el.textContent = (v > 0 ? String(v) : '');
+                };
+                set('nav-count-queues', d.queues || 0);
+                set('nav-count-workers', d.workers || 0);
+                set('nav-count-dlq', d.dead_letter || 0);
+            }).catch(function() {});
+        };
+        update();
+        GQM.app.navCountTimer = setInterval(update, 30000);
     },
 
     // Show the login page (hides sidebar).
@@ -78,7 +119,7 @@ GQM.app = {
             var errorEl = document.getElementById('login-error');
             if (errorEl) {
                 errorEl.textContent = GQM.app.loginMessage;
-                errorEl.style.display = '';
+                errorEl.style.display = 'block';
             }
             GQM.app.loginMessage = null;
         }

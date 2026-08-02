@@ -113,6 +113,53 @@ GQM.utils = {
         return html;
     },
 
+    // Build a standard page header.
+    // opts: { title (HTML), sub, crumbs (HTML), right (HTML), poll (e.g. "10s"), titleClass }
+    pageHead: function(opts) {
+        var right = '';
+        if (opts.poll) {
+            right += '<span class="live"><span class="dot"></span>Live &middot; ' + opts.poll + '</span>';
+        }
+        if (opts.right) right += opts.right;
+        return '<div class="page-header"><div>' +
+            (opts.crumbs ? '<div class="crumbs">' + opts.crumbs + '</div>' : '') +
+            '<h2' + (opts.titleClass ? ' class="' + opts.titleClass + '"' : '') + '>' + opts.title + '</h2>' +
+            (opts.sub ? '<p class="sub">' + opts.sub + '</p>' : '') +
+            '</div>' +
+            (right ? '<div class="head-right">' + right + '</div>' : '') +
+            '</div>';
+    },
+
+    // Resolve a CSS custom property to its computed value (theme-aware).
+    themeVar: function(name, fallback) {
+        var v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        return v || fallback || '';
+    },
+
+    // Human-readable description for common cron expressions.
+    // Returns '' when the expression doesn't match a simple pattern.
+    cronHuman: function(expr) {
+        if (!expr) return '';
+        var p = expr.trim().split(/\s+/);
+        if (p.length !== 5) return '';
+        var min = p[0], hour = p[1], dom = p[2], mon = p[3], dow = p[4];
+        var pad = function(n) { return (n.length < 2 ? '0' : '') + n; };
+        var dows = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        if (min === '*' && hour === '*' && dom === '*' && mon === '*' && dow === '*') return 'Every minute';
+        if (/^\d+$/.test(min) && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
+            return min === '0' ? 'Every hour' : 'Hourly at :' + pad(min);
+        }
+        if (/^\d+$/.test(min) && /^\d+$/.test(hour) && dom === '*' && mon === '*') {
+            var t = pad(hour) + ':' + pad(min);
+            if (dow === '*') return 'Daily at ' + t;
+            if (/^\d+$/.test(dow) && dows[+dow]) return dows[+dow] + 's at ' + t;
+        }
+        if (min.indexOf('*/') === 0 && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
+            return 'Every ' + min.slice(2) + ' min';
+        }
+        return '';
+    },
+
     // Parse hash route: "#/queues/email?pool=x" -> { page: "queues", param: "email", query: {pool:"x"} }
     parseRoute: function() {
         var hash = window.location.hash.replace(/^#\/?/, '');

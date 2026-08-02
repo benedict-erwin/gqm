@@ -7,7 +7,11 @@ GQM.pages = GQM.pages || {};
 GQM.pages.scheduler = {
     render: function(container) {
         container.innerHTML =
-            '<div class="page-header"><h2>Scheduler (Cron)</h2></div>' +
+            GQM.utils.pageHead({
+                title: 'Scheduler',
+                sub: 'Cron entries and their trigger history',
+                poll: '30s'
+            }) +
             '<div id="cron-table" class="table-wrap"><div class="loading">Loading cron entries</div></div>' +
             '<div id="cron-detail"></div>';
 
@@ -21,6 +25,13 @@ GQM.pages.scheduler = {
             else if (action === 'disable') GQM.pages.scheduler.disable(id);
             else if (action === 'enable') GQM.pages.scheduler.enable(id);
             else if (action === 'history') GQM.pages.scheduler.showHistory(id);
+        });
+
+        // Close button in the history panel
+        document.getElementById('cron-detail').addEventListener('click', function(e) {
+            if (e.target.closest('[data-action="close-history"]')) {
+                document.getElementById('cron-detail').innerHTML = '';
+            }
         });
 
         GQM.app.poll(function() { GQM.pages.scheduler.load(); }, 30000);
@@ -40,26 +51,28 @@ GQM.pages.scheduler = {
             var rows = entries.map(function(e) {
                 var enabled = e.enabled !== false;
                 var statusBadge = enabled ? GQM.utils.statusBadge('active') : GQM.utils.statusBadge('paused');
+                var human = GQM.utils.cronHuman(e.cron_expr || '');
                 return '<tr>' +
-                    '<td class="mono">' + GQM.utils.escapeHTML(e.id || '') + '</td>' +
-                    '<td class="mono">' + GQM.utils.escapeHTML(e.cron_expr || '') + '</td>' +
+                    '<td><b>' + GQM.utils.escapeHTML(e.id || '') + '</b></td>' +
+                    '<td><span class="chip">' + GQM.utils.escapeHTML(e.cron_expr || '') + '</span>' +
+                    (human ? ' <span class="dim text-sm">' + GQM.utils.escapeHTML(human) + '</span>' : '') + '</td>' +
                     '<td>' + GQM.utils.escapeHTML(e.job_type || '') + '</td>' +
-                    '<td>' + GQM.utils.escapeHTML(e.queue || '') + '</td>' +
+                    '<td><a href="#/queues/' + GQM.utils.escapeHTML(e.queue || '') + '">' + GQM.utils.escapeHTML(e.queue || '') + '</a></td>' +
+                    '<td class="dim">' + GQM.utils.escapeHTML(e.timezone || 'UTC') + '</td>' +
                     '<td>' + statusBadge + '</td>' +
-                    '<td>' + GQM.utils.escapeHTML(e.timezone || 'UTC') + '</td>' +
-                    '<td class="btn-group">' +
+                    '<td class="actions-cell"><div class="btn-group btn-group--right">' +
                     '<button class="btn btn--sm btn--primary" data-action="trigger" data-id="' + GQM.utils.escapeHTML(e.id) + '">Trigger</button>' +
                     (enabled
                         ? '<button class="btn btn--sm" data-action="disable" data-id="' + GQM.utils.escapeHTML(e.id) + '">Disable</button>'
                         : '<button class="btn btn--sm" data-action="enable" data-id="' + GQM.utils.escapeHTML(e.id) + '">Enable</button>') +
-                    '<button class="btn btn--sm" data-action="history" data-id="' + GQM.utils.escapeHTML(e.id) + '">History</button>' +
-                    '</td>' +
+                    '<button class="btn btn--sm btn--ghost" data-action="history" data-id="' + GQM.utils.escapeHTML(e.id) + '">History</button>' +
+                    '</div></td>' +
                     '</tr>';
             }).join('');
 
             el.innerHTML =
                 '<table><thead><tr>' +
-                '<th>ID</th><th>Expression</th><th>Job Type</th><th>Queue</th><th>Status</th><th>Timezone</th><th>Actions</th>' +
+                '<th>Entry</th><th>Schedule</th><th>Job type</th><th>Queue</th><th>Timezone</th><th>Status</th><th class="actions-col">Actions</th>' +
                 '</tr></thead><tbody>' + rows + '</tbody></table>';
         }).catch(function() {
             var el = document.getElementById('cron-table');
@@ -93,23 +106,31 @@ GQM.pages.scheduler = {
         if (!detail) return;
         detail.innerHTML = '<div class="loading">Loading history</div>';
 
+        var esc = GQM.utils.escapeHTML;
+        var panelHead =
+            '<div class="flex-between mb-1">' +
+            '<h3 style="margin:0">History &mdash; ' + esc(id) + '</h3>' +
+            '<button class="btn btn--sm btn--ghost" data-action="close-history">Close</button>' +
+            '</div>';
+
         GQM.api.get('/api/v1/cron/' + encodeURIComponent(id) + '/history?limit=20').then(function(resp) {
             var records = resp.data || [];
             if (records.length === 0) {
-                detail.innerHTML = '<div class="detail-panel"><h3>History: ' + GQM.utils.escapeHTML(id) + '</h3><p class="text-secondary mt-1">No history yet</p></div>';
+                detail.innerHTML = '<div class="detail-panel">' + panelHead +
+                    '<p class="text-secondary">No history yet</p></div>';
                 return;
             }
 
             var rows = records.map(function(r) {
                 return '<tr>' +
-                    '<td class="mono truncate"><a href="#/jobs/' + GQM.utils.escapeHTML(r.job_id) + '">' + GQM.utils.escapeHTML(r.job_id) + '</a></td>' +
-                    '<td>' + GQM.utils.formatTime(r.triggered_at) + '</td>' +
+                    '<td class="mono truncate"><a href="#/jobs/' + esc(r.job_id) + '">' + esc(r.job_id) + '</a></td>' +
+                    '<td class="dim">' + GQM.utils.formatTime(r.triggered_at) + '</td>' +
                     '</tr>';
             }).join('');
 
             detail.innerHTML =
-                '<div class="detail-panel"><h3 class="mb-1">History: ' + GQM.utils.escapeHTML(id) + '</h3>' +
-                '<div class="table-wrap"><table><thead><tr><th>Job ID</th><th>Triggered At</th></tr></thead>' +
+                '<div class="detail-panel">' + panelHead +
+                '<div class="table-wrap" style="margin:0;box-shadow:none"><table><thead><tr><th>Job</th><th>Triggered</th></tr></thead>' +
                 '<tbody>' + rows + '</tbody></table></div></div>';
         }).catch(function() {
             detail.innerHTML = '<div class="error-state">Failed to load history</div>';

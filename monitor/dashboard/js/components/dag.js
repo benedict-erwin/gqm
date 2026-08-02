@@ -7,19 +7,21 @@ GQM.pages = GQM.pages || {};
 GQM.pages.dag = {
     cy: null,
 
-    // Status color mapping (bg + border).
+    // Status color mapping (bg + border), resolved from the active theme so
+    // the graph matches light/dark mode. Fallbacks are the light-theme hexes.
     statusColor: function(status) {
-        var colors = {
-            ready:       { bg: '#dbeafe', border: '#1d4ed8' },
-            processing:  { bg: '#fef3c7', border: '#92400e' },
-            completed:   { bg: '#d1fae5', border: '#065f46' },
-            failed:      { bg: '#fee2e2', border: '#991b1b' },
-            dead_letter: { bg: '#fce7f3', border: '#9d174d' },
-            deferred:    { bg: '#e0e7ff', border: '#3730a3' },
-            canceled:    { bg: '#f1f5f9', border: '#475569' },
-            unknown:     { bg: '#f1f5f9', border: '#94a3b8' }
+        var tv = GQM.utils.themeVar;
+        var map = {
+            ready:       { bg: tv('--st-ready-bg', '#dbeafd'),      border: tv('--st-ready-fg', '#1c56c4') },
+            processing:  { bg: tv('--st-processing-bg', '#fdf0d0'), border: tv('--st-processing-fg', '#8f5c05') },
+            completed:   { bg: tv('--st-completed-bg', '#dcf2e0'),  border: tv('--st-completed-fg', '#186f3a') },
+            failed:      { bg: tv('--st-failed-bg', '#fbe3e3'),     border: tv('--st-failed-fg', '#a02c2c') },
+            dead_letter: { bg: tv('--st-dlq-bg', '#f9e2ee'),        border: tv('--st-dlq-fg', '#a1246b') },
+            deferred:    { bg: tv('--st-deferred-bg', '#e8e6fa'),   border: tv('--st-deferred-fg', '#4c3fb0') },
+            canceled:    { bg: tv('--st-canceled-bg', '#e9eeec'),   border: tv('--st-canceled-fg', '#5c6b66') },
+            unknown:     { bg: tv('--st-unknown-bg', '#e9eeec'),    border: tv('--st-unknown-fg', '#7f8f89') }
         };
-        return colors[status] || colors.unknown;
+        return map[status] || map.unknown;
     },
 
     // Render the full DAG page.
@@ -36,39 +38,40 @@ GQM.pages.dag = {
 
         // Build page layout.
         var html =
-            '<div class="page-header"><h2>DAG Dependencies</h2></div>' +
+            GQM.utils.pageHead({
+                title: 'DAG dependencies',
+                sub: 'Explore job dependency chains',
+                poll: '15s'
+            }) +
 
             // Search toolbar
-            '<div class="card mb-2">' +
-            '<div class="dag-toolbar">' +
-            '<input type="text" id="dag-search" class="input" placeholder="Enter job ID..." value="' + esc(jobId || '') + '">' +
-            '<button id="dag-load-btn" class="btn btn--primary">Load Graph</button>' +
+            '<div class="filter-bar">' +
+            '<div class="filter-group" style="flex:1;max-width:420px">' +
+            '<input type="text" id="dag-search" class="input" placeholder="Load graph by job ID..." value="' + esc(jobId || '') + '" style="width:100%">' +
             '</div>' +
+            '<button id="dag-load-btn" class="btn btn--primary">Load graph</button>' +
             '</div>' +
 
             // DAG Chains table (from roots endpoint — always has data)
-            '<div class="card mb-2">' +
-            '<h3 class="mb-1">DAG Chains</h3>' +
-            '<p class="text-secondary text-sm mb-1">Parent jobs with dependency graphs. Click View Graph to visualize.</p>' +
-            '<div id="dag-roots"></div>' +
-            '</div>' +
+            '<p class="section-label">Chains</p>' +
+            '<div id="dag-roots" class="table-wrap" style="padding-bottom:2px"><div class="loading">Loading chains</div></div>' +
 
             // Deferred jobs table (collapsible secondary)
-            '<div class="card mb-2">' +
-            '<div style="display:flex;align-items:center;gap:0.5rem;cursor:pointer" id="dag-deferred-toggle">' +
-            '<h3>Deferred Jobs</h3>' +
+            '<div class="detail-panel">' +
+            '<div class="collapse-head" id="dag-deferred-toggle">' +
+            '<h3 style="margin:0;text-transform:none;letter-spacing:0;font-size:13px;color:var(--text)">Deferred jobs</h3>' +
             '<span class="text-secondary text-sm" id="dag-deferred-count"></span>' +
-            '<span class="text-secondary" style="margin-left:auto">&#9660;</span>' +
+            '<span class="text-secondary" style="margin-left:auto;font-size:11px">&#9660;</span>' +
             '</div>' +
-            '<div id="dag-deferred" style="display:none;margin-top:0.5rem"></div>' +
+            '<div id="dag-deferred" style="display:none;margin-top:10px"></div>' +
             '</div>' +
 
             // Graph section
             '<div id="dag-graph-section" style="display:none">' +
-            '<div class="card mb-2">' +
-            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">' +
-            '<h3>Graph Visualization</h3>' +
-            '<button id="dag-fit-btn" class="btn btn--sm">Fit View</button>' +
+            '<div class="detail-panel">' +
+            '<div class="flex-between mb-1">' +
+            '<h3 style="margin:0">Graph</h3>' +
+            '<button id="dag-fit-btn" class="btn btn--sm">Fit view</button>' +
             '</div>' +
             '<div id="dag-legend" class="dag-legend"></div>' +
             '<div id="dag-graph" class="dag-graph-container"></div>' +
@@ -143,37 +146,37 @@ GQM.pages.dag = {
             var meta = resp.meta || {};
 
             if (jobs.length === 0) {
-                el.innerHTML = '<p class="text-secondary text-sm">No DAG chains found.</p>';
+                el.innerHTML = '<div class="empty-state"><p>No DAG chains found</p></div>';
                 return;
             }
 
             var esc = GQM.utils.escapeHTML;
-            var html = '<div class="table-wrapper"><table class="table">' +
+            var html = '<table>' +
                 '<thead><tr>' +
-                '<th>Job ID</th><th>Type</th><th>Status</th><th>Queue</th><th>Children</th><th>Created</th><th>Actions</th>' +
+                '<th>Root job</th><th>Type</th><th>Status</th><th>Queue</th><th class="num">Children</th><th>Created</th><th class="actions-col">Actions</th>' +
                 '</tr></thead><tbody>';
 
             jobs.forEach(function(job) {
-                var created = GQM.utils.formatRelative(parseInt(job.created_at, 10) || 0);
+                var created = parseInt(job.created_at, 10) || 0;
 
                 html += '<tr>' +
-                    '<td><a href="#/jobs/' + esc(job.id) + '"><code>' + esc(job.id) + '</code></a></td>' +
+                    '<td class="mono truncate"><a href="#/jobs/' + esc(job.id) + '">' + esc(job.id) + '</a></td>' +
                     '<td>' + esc(job.type) + '</td>' +
                     '<td>' + GQM.utils.statusBadge(job.status) + '</td>' +
-                    '<td>' + esc(job.queue) + '</td>' +
-                    '<td>' + esc(job.child_count || 0) + '</td>' +
-                    '<td>' + esc(created) + '</td>' +
-                    '<td><button class="btn btn--sm btn--primary dag-view-btn" data-job-id="' + esc(job.id) + '">View Graph</button></td>' +
+                    '<td><a href="#/queues/' + esc(job.queue) + '">' + esc(job.queue) + '</a></td>' +
+                    '<td class="num">' + esc(job.child_count || 0) + '</td>' +
+                    '<td class="dim" title="' + esc(GQM.utils.formatTime(created)) + '">' + esc(GQM.utils.formatRelative(created)) + '</td>' +
+                    '<td class="actions-cell"><button class="btn btn--sm dag-view-btn" data-job-id="' + esc(job.id) + '">View graph</button></td>' +
                     '</tr>';
             });
 
-            html += '</tbody></table></div>';
+            html += '</tbody></table>';
             // The scan behind this endpoint is bounded, so on a large keyspace
             // the total is a floor rather than the real count. Say so: a count
             // that is quietly short reads as the whole picture.
             if (meta.truncated) {
-                html += '<p class="text-secondary text-sm">Showing the first ' +
-                    esc(meta.total || 0) + ' chains — the scan was capped, so more may exist.</p>';
+                html += '<div class="pagination-note">Showing the first ' +
+                    esc(meta.total || 0) + ' chains — the scan was capped, so more may exist.</div>';
             }
             html += GQM.utils.paginationHTML(meta.page || 1, meta.limit || 20, meta.total || 0);
             el.innerHTML = html;
@@ -196,7 +199,7 @@ GQM.pages.dag = {
             });
         }).catch(function() {
             var el = document.getElementById('dag-roots');
-            if (el) el.innerHTML = '<p class="text-secondary text-sm">Failed to load DAG chains.</p>';
+            if (el) el.innerHTML = '<div class="error-state">Failed to load DAG chains</div>';
         });
     },
 
@@ -212,7 +215,7 @@ GQM.pages.dag = {
 
             // Update count badge.
             var countEl = document.getElementById('dag-deferred-count');
-            if (countEl) countEl.textContent = '(' + (meta.total || 0) + ')';
+            if (countEl) countEl.textContent = '(' + (meta.total || 0) + ' waiting on dependencies)';
 
             if (jobs.length === 0) {
                 el.innerHTML = '<p class="text-secondary text-sm">No deferred jobs currently waiting.</p>';
@@ -220,23 +223,23 @@ GQM.pages.dag = {
             }
 
             var esc = GQM.utils.escapeHTML;
-            var html = '<div class="table-wrapper"><table class="table">' +
+            var html = '<div class="table-wrapper"><table>' +
                 '<thead><tr>' +
-                '<th>ID</th><th>Type</th><th>Queue</th><th>Pending Deps</th><th>Actions</th>' +
+                '<th>Job</th><th>Type</th><th>Queue</th><th>Pending deps</th><th class="actions-col">Actions</th>' +
                 '</tr></thead><tbody>';
 
             jobs.forEach(function(job) {
                 var pending = job.pending_deps || [];
                 var pendingHtml = pending.length > 0
-                    ? pending.map(function(p) { return '<a href="#/jobs/' + esc(p) + '">' + esc(p.substring(0, 8)) + '</a>'; }).join(', ')
+                    ? pending.map(function(p) { return '<a href="#/jobs/' + esc(p) + '" class="chip">' + esc(p.substring(0, 8)) + '&hellip;</a>'; }).join(' ')
                     : '<span class="text-secondary">none</span>';
 
                 html += '<tr>' +
-                    '<td><code>' + esc((job.id || '').substring(0, 12)) + '</code></td>' +
+                    '<td class="mono truncate"><a href="#/jobs/' + esc(job.id) + '">' + esc(job.id) + '</a></td>' +
                     '<td>' + esc(job.type) + '</td>' +
-                    '<td>' + esc(job.queue) + '</td>' +
+                    '<td><a href="#/queues/' + esc(job.queue) + '">' + esc(job.queue) + '</a></td>' +
                     '<td>' + pendingHtml + '</td>' +
-                    '<td><button class="btn btn--sm dag-view-btn" data-job-id="' + esc(job.id) + '">View Graph</button></td>' +
+                    '<td class="actions-cell"><button class="btn btn--sm dag-view-btn" data-job-id="' + esc(job.id) + '">View graph</button></td>' +
                     '</tr>';
             });
 
@@ -285,7 +288,7 @@ GQM.pages.dag = {
 
             if (nodes.length === 0) {
                 document.getElementById('dag-graph').innerHTML =
-                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--color-text-secondary)">' +
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-3)">' +
                     'Job not found or no graph data available.</div>';
                 document.getElementById('dag-legend').innerHTML = '';
                 return;
@@ -335,6 +338,10 @@ GQM.pages.dag = {
             // Scroll graph into view.
             section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
+            var textColor = GQM.utils.themeVar('--text', '#182422');
+            var edgeColor = GQM.utils.themeVar('--border-strong', '#c2cfcb');
+            var arrowColor = GQM.utils.themeVar('--text-3', '#7f8f89');
+
             self.cy = cytoscape({
                 container: graphEl,
                 elements: { nodes: cyNodes, edges: cyEdges },
@@ -361,15 +368,15 @@ GQM.pages.dag = {
                             'shape': 'round-rectangle',
                             'width': 130,
                             'height': 50,
-                            'color': '#1e293b'
+                            'color': textColor
                         }
                     },
                     {
                         selector: 'edge',
                         style: {
                             'width': 2,
-                            'line-color': '#94a3b8',
-                            'target-arrow-color': '#64748b',
+                            'line-color': edgeColor,
+                            'target-arrow-color': arrowColor,
                             'target-arrow-shape': 'triangle',
                             'curve-style': 'bezier',
                             'arrow-scale': 1.2
@@ -413,7 +420,7 @@ GQM.pages.dag = {
             var graphEl = document.getElementById('dag-graph');
             if (graphEl) {
                 graphEl.innerHTML =
-                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--color-danger)">' +
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--danger)">' +
                     'Failed to load graph: ' + GQM.utils.escapeHTML(err.message) + '</div>';
             }
         });
@@ -438,7 +445,7 @@ GQM.pages.dag = {
             var c = self.statusColor(s);
             html += '<span class="dag-legend-item">' +
                 '<span class="dag-legend-swatch" style="background:' + c.bg + ';border-color:' + c.border + '"></span>' +
-                s +
+                s.replace(/_/g, ' ') +
                 '</span>';
         });
         legendEl.innerHTML = html;
@@ -450,16 +457,16 @@ GQM.pages.dag = {
         if (!el) return;
 
         var esc = GQM.utils.escapeHTML;
-        var html = '<h4 style="margin-bottom:0.5rem">Node Detail</h4><dl>' +
+        var html = '<h4 style="margin-bottom:0.5rem">Node detail</h4><dl>' +
             '<dt>ID</dt><dd><code>' + esc(nodeData.id) + '</code></dd>' +
             '<dt>Type</dt><dd>' + esc(nodeData.type || '—') + '</dd>' +
             '<dt>Status</dt><dd>' + GQM.utils.statusBadge(nodeData.status || 'unknown') + '</dd>' +
-            '<dt>Queue</dt><dd>' + esc(nodeData.queue || '—') + '</dd>' +
-            '<dt>Allow Failure</dt><dd>' + (nodeData.allow_failure ? 'Yes' : 'No') + '</dd>' +
+            '<dt>Queue</dt><dd>' + (nodeData.queue ? '<a href="#/queues/' + esc(nodeData.queue) + '">' + esc(nodeData.queue) + '</a>' : '—') + '</dd>' +
+            '<dt>Allow failure</dt><dd>' + (nodeData.allow_failure ? 'Yes' : 'No') + '</dd>' +
             '<dt>Created</dt><dd>' + GQM.utils.formatTime(parseInt(nodeData.created_at, 10) || 0) + '</dd>' +
             '</dl>' +
             '<div style="margin-top:0.75rem">' +
-            '<a href="#/jobs/' + esc(nodeData.id) + '" class="btn btn--sm">View Job</a>' +
+            '<a href="#/jobs/' + esc(nodeData.id) + '" class="btn btn--sm">View job</a>' +
             '</div>';
 
         el.innerHTML = html;

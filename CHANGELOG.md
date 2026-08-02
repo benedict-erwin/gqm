@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Dashboard redesigned** — a new visual system across every page: dual theme (dark/light, follows the OS preference with an in-app toggle), status pills consistent on all pages, grouped sidebar navigation with icons and live count badges, per-page polling indicator, stat-card groups on the overview with a compact runtime strip, theme-aware chart and DAG graph colors, a job-detail timeline with a two-column layout and header actions, queue-detail status filter as a segmented control with pause/empty actions, a DLQ bulk-selection bar with severity stripes, and human-readable cron schedules next to the raw expression. Embedded dashboard `VERSION` bumped to 0.2.0
+
+### Fixed
+- **Dashboard: job-detail actions could fire once per page visit** — the click delegation was attached to the persistent app container, so every visit stacked another listener; one Delete click then sent repeated requests and stacked confirm dialogs. Delegation now binds to an element recreated on each render
+- **Dashboard: assorted long-standing UI defects** — pagination click handlers re-attached on every poll (queue detail, DLQ), DLQ poll timers stacking when switching queues, jobs-by-status loading twice on entry, the session-expired message never appearing on the login page, the `warning` toast having no style, and the DAG page referencing CSS classes that did not exist
+
 ## [0.3.1] — 2026-08-01
 
 A single fix for a memory leak that has been present since retention shipped in
