@@ -71,8 +71,13 @@ func (s *Server) RetryJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// CancelJob cancels a job that is ready, scheduled, or deferred.
-// Processing jobs cannot be canceled (handler is already running).
+// CancelJob cancels a job that is ready, scheduled, deferred, or processing.
+//
+// Canceling a processing job abandons the claim rather than stopping the
+// handler: a handler still running in another process runs to its own end, but
+// its completion is discarded because the job is no longer in the processing
+// set. This is the only recovery path for a job whose worker process died mid
+// flight and whose claim would otherwise never be released.
 func (s *Server) CancelJob(ctx context.Context, jobID string) error {
 	jobKey := s.rc.Key("job", jobID)
 	data, err := s.rc.rdb.HGetAll(ctx, jobKey).Result()
@@ -84,8 +89,9 @@ func (s *Server) CancelJob(ctx context.Context, jobID string) error {
 	}
 
 	status := data["status"]
-	if status != StatusReady && status != StatusScheduled && status != StatusDeferred {
-		return fmt.Errorf("gqm: cannot cancel job with status %q (must be ready, scheduled, or deferred)", status)
+	if status != StatusReady && status != StatusScheduled &&
+		status != StatusDeferred && status != StatusProcessing {
+		return fmt.Errorf("gqm: cannot cancel job with status %q (must be ready, scheduled, deferred, or processing)", status)
 	}
 
 	queue := data["queue"]
@@ -96,6 +102,7 @@ func (s *Server) CancelJob(ctx context.Context, jobID string) error {
 	readyKey := s.rc.Key("queue", queue, "ready")
 	scheduledKey := s.rc.Key("scheduled")
 	deferredKey := s.rc.Key("deferred")
+	processingKey := s.rc.Key("queue", queue, "processing")
 
 	// The job hash is already in hand, so a per-job override costs no extra read.
 	var failureTTLOverride *int
@@ -106,7 +113,7 @@ func (s *Server) CancelJob(ctx context.Context, jobID string) error {
 
 	now := time.Now().Unix()
 	result := s.scripts.run(ctx, s.rc.rdb, "admin_cancel",
-		[]string{jobKey, readyKey, scheduledKey, deferredKey},
+		[]string{jobKey, readyKey, scheduledKey, deferredKey, processingKey},
 		jobID, now, status, s.cfg.failureRetention(failureTTLOverride),
 	)
 	if result.Err() != nil {
