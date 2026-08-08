@@ -522,7 +522,7 @@ GQM.pages.jobs = {
                 (j.timeout ? '<dt>Timeout</dt><dd class="mono">' + GQM.utils.formatDuration(Number(j.timeout)) + '</dd>' : '') +
                 (j.execution_duration ? '<dt>Duration</dt><dd class="mono">' + GQM.utils.formatDuration(Number(j.execution_duration)) + '</dd>' : '') +
                 (j.worker_id ? '<dt>Worker</dt><dd class="mono">' + esc(j.worker_id) + '</dd>' : '') +
-                (j.stale ? '<dt>Stale</dt><dd style="color:var(--danger)">worker presumed dead — processing deadline passed</dd>' : '') +
+                (j.stale ? '<dt>Stale</dt><dd style="color:var(--danger)">worker presumed dead — processing deadline passed<br><span class="dim">will be retried or dead-lettered automatically; cancel to discard instead</span></dd>' : '') +
                 (j.enqueued_by ? '<dt>Enqueued by</dt><dd>' + esc(j.enqueued_by) + '</dd>' : '') +
                 (j.error ? '<dt>Error</dt><dd style="color:var(--danger)">' + esc(j.error) + '</dd>' : '') +
                 '</dl>' +
