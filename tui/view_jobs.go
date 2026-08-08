@@ -77,7 +77,7 @@ func (v *jobsView) render(width, maxRows int) string {
 		t.addRow(
 			j.str("id"),
 			j.str("type"),
-			styleStatus(j.str("status")),
+			jobStatusCell(j),
 			mutedStyle.Render(formatUnixTime(j.int64val("created_at"), now)),
 			errText,
 		)

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-08-08
+
+A reliability release closing one long-standing hole: a worker process that
+died mid-job stranded its in-flight jobs in `processing` forever, with no
+recovery path. Those jobs are now reclaimed automatically, can be canceled
+manually, and are flagged in every UI while they wait.
+
+Operators upgrading should expect one-time movement: jobs stuck in
+`processing` from past crashes will be retried or dead-lettered shortly
+after the first upgraded instance starts. The public Go API is unchanged
+(`CancelJob` now accepts a status it previously rejected); API responses
+gain additive fields only. The `tui` module is tagged `tui/v0.3.0`.
+
+### Added
+- **Stale-job reaper** — a worker process that dies mid-job (crash, OOM-kill, deploy restart) no longer strands its in-flight jobs in `processing` forever. The scheduler now scans each queue's processing set for claims whose deadline passed beyond the pool's grace period plus a safety margin and atomically re-runs the normal failure path: retry with backoff while the retry budget lasts, dead-letter after. Runs on every instance, lock-free; a score guard prevents stealing a claim that was legitimately re-acquired in the meantime. Requires at least one instance with worker pools and the scheduler enabled (the default)
+- **Cancel now reaches processing jobs** — `Server.CancelJob` and the dashboard/API cancel action accept jobs in `processing`: the claim is abandoned and the job marked canceled, a manual escape hatch for stuck claims. A handler still running elsewhere finishes without effect
+- **Stale-claim visibility** — processing jobs whose deadline has passed render as `stale` ("worker presumed dead") in the dashboard, TUI, and job API (new `stale` and `processing_deadline` fields) instead of as healthy PROCESSING
+
+### Changed
+- Embedded dashboard `VERSION` bumped to 0.3.0 (stale badge in job lists and detail, next-step hint on stale job detail)
+
 ## [0.4.0] — 2026-08-02
 
 A user-interface release: every surface you look at — web dashboard, CLI

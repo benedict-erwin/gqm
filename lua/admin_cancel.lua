@@ -5,6 +5,7 @@
 -- KEYS[2]: ready list (gqm:queue:{name}:ready)
 -- KEYS[3]: scheduled sorted set (gqm:scheduled)
 -- KEYS[4]: deferred set (gqm:deferred)
+-- KEYS[5]: processing sorted set (gqm:queue:{name}:processing)
 --
 -- ARGV[1]: job ID
 -- ARGV[2]: current timestamp
@@ -13,6 +14,12 @@
 --          0 deletes the record outright, <0 retains it permanently
 --
 -- Returns: 1 on success, 0 if job was not found in expected location
+--
+-- Canceling a processing job means abandoning the claim, not stopping the
+-- handler: a handler still running in another process keeps running to its own
+-- end. Its complete/retry/fail script then finds the job gone from the
+-- processing set, hits the ZREM == 0 guard and does nothing, so the cancel
+-- stands and no state is written twice.
 
 local status = ARGV[3]
 local removed = 0
@@ -23,6 +30,8 @@ elseif status == 'scheduled' then
     removed = redis.call('ZREM', KEYS[3], ARGV[1])
 elseif status == 'deferred' then
     removed = redis.call('SREM', KEYS[4], ARGV[1])
+elseif status == 'processing' then
+    removed = redis.call('ZREM', KEYS[5], ARGV[1])
 else
     return 0
 end

@@ -123,6 +123,21 @@ func (j Job) floatStr(key string) string {
 	return ""
 }
 
+// stale reports whether the API flagged this job's claim as abandoned: its
+// processing deadline passed by more than any live worker could still be
+// holding it, so the worker process is presumed dead.
+func (j Job) stale() bool {
+	if v, ok := j["stale"]; ok {
+		switch t := v.(type) {
+		case bool:
+			return t
+		case string:
+			return t == "true"
+		}
+	}
+	return false
+}
+
 func (j Job) int64val(key string) int64 {
 	if v, ok := j[key]; ok {
 		switch t := v.(type) {

@@ -199,12 +199,38 @@ func TestCancelJob_Processing(t *testing.T) {
 	s, rdb := testAdminServer(t)
 	ctx := context.Background()
 
+	processingKey := s.rc.Key("queue", "default", "processing")
+	rdb.HSet(ctx, s.rc.Key("job", "j1"),
+		"id", "j1", "type", "test", "queue", "default", "status", "processing")
+	rdb.ZAdd(ctx, processingKey,
+		redis.Z{Score: float64(time.Now().Add(time.Hour).Unix()), Member: "j1"})
+
+	if err := s.CancelJob(ctx, "j1"); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+
+	status, _ := rdb.HGet(ctx, s.rc.Key("job", "j1"), "status").Result()
+	if status != StatusCanceled {
+		t.Errorf("status = %q, want canceled", status)
+	}
+
+	n, _ := rdb.ZCard(ctx, processingKey).Result()
+	if n != 0 {
+		t.Errorf("processing set card = %d, want 0", n)
+	}
+}
+
+func TestCancelJob_ProcessingNotInSet(t *testing.T) {
+	s, rdb := testAdminServer(t)
+	ctx := context.Background()
+
+	// Hash says processing but the claim is gone from the processing set:
+	// there is nothing left to abandon, so cancel must report not found.
 	rdb.HSet(ctx, s.rc.Key("job", "j1"),
 		"id", "j1", "type", "test", "queue", "default", "status", "processing")
 
-	err := s.CancelJob(ctx, "j1")
-	if err == nil {
-		t.Fatal("expected error for processing job")
+	if err := s.CancelJob(ctx, "j1"); err == nil {
+		t.Fatal("expected error when job is not in the processing set")
 	}
 }
 

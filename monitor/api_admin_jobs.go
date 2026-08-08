@@ -33,7 +33,8 @@ func (m *Monitor) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleCancelJob cancels a pending/scheduled/deferred job.
+// handleCancelJob cancels a pending/scheduled/deferred/processing job.
+// Canceling a processing job abandons the claim; see gqm.Server.CancelJob.
 func (m *Monitor) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	if m.admin == nil {
 		writeError(w, http.StatusNotImplemented, "admin operations not available", "NOT_IMPLEMENTED")
