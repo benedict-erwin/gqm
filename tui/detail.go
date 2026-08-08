@@ -43,7 +43,11 @@ func (v *detailView) render(width, maxRows int) string {
 	var b strings.Builder
 	id := j.str("id")
 	crumb := mutedStyle.Render(fmt.Sprintf("%s / %s / ", v.from, j.str("queue")))
-	b.WriteString(" " + crumb + boldStyle.Render(id) + "  " + styleStatus(j.str("status")) + "\n\n")
+	head := " " + crumb + boldStyle.Render(id) + "  " + jobStatusCell(j)
+	if j.stale() {
+		head += "  " + errStyle.Render("worker presumed dead")
+	}
+	b.WriteString(head + "\n\n")
 
 	// Compact meta line(s)
 	meta := func(k, val string) string {

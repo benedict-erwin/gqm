@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -25,7 +26,65 @@ func (m *Monitor) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := mapToJobResponse(data)
+	m.annotateStale(ctx, []map[string]any{job})
 	writeJSON(w, http.StatusOK, response{Data: job})
+}
+
+// staleMarginSeconds is how long past its processing deadline a claim may sit
+// before it is reported as stale.
+//
+// A live worker leaves the processing set by its deadline plus the pool grace
+// period; the server's reaper waits that long plus a slack window before
+// reclaiming the job. This constant mirrors the sum of the two defaults so the
+// dashboard and the reaper agree on which claims are abandoned. Pools
+// configured with a longer grace period than the default may see the flag
+// appear slightly before the reaper acts.
+const staleMarginSeconds int64 = 25 // default grace period (10s) + reaper slack (15s)
+
+// annotateStale adds the processing deadline and a stale flag to every
+// processing job in jobs. A job whose deadline has passed by more than
+// staleMarginSeconds is one no live worker could still be holding, so rendering
+// it as a healthy PROCESSING job would misreport a dead process as work in
+// flight.
+//
+// Jobs in any other status, and processing jobs with no entry in their queue's
+// processing set, are left untouched: there is no deadline to judge them by.
+func (m *Monitor) annotateStale(ctx context.Context, jobs []map[string]any) {
+	type claim struct {
+		job map[string]any
+		cmd *redis.FloatCmd
+	}
+
+	pipe := m.rdb.Pipeline()
+	claims := make([]claim, 0, len(jobs))
+	for _, job := range jobs {
+		if status, _ := job["status"].(string); status != "processing" {
+			continue
+		}
+		id, _ := job["id"].(string)
+		queue, _ := job["queue"].(string)
+		if id == "" || queue == "" {
+			continue
+		}
+		claims = append(claims, claim{
+			job: job,
+			cmd: pipe.ZScore(ctx, m.key("queue", queue, "processing"), id),
+		})
+	}
+	if len(claims) == 0 {
+		return
+	}
+	pipe.Exec(ctx)
+
+	now := time.Now().Unix()
+	for _, c := range claims {
+		deadline, err := c.cmd.Result()
+		if err != nil {
+			continue
+		}
+		c.job["processing_deadline"] = int64(deadline)
+		c.job["stale"] = now > int64(deadline)+staleMarginSeconds
+	}
 }
 
 // handleListDLQ returns paginated dead letter queue jobs.
@@ -82,6 +141,7 @@ func (m *Monitor) fetchJobSummaries(ctx context.Context, jobIDs []string) []map[
 		}
 		jobs = append(jobs, mapToJobResponse(data))
 	}
+	m.annotateStale(ctx, jobs)
 	return jobs
 }
 

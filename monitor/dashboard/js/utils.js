@@ -44,6 +44,16 @@ GQM.utils = {
         return '<span class="badge badge--' + cls + '">' + GQM.utils.escapeHTML(status) + '</span>';
     },
 
+    // Return a status badge for a job. A processing job the API flagged as
+    // stale is one whose claim outlived any deadline a live worker could hold,
+    // so it renders as stale rather than as healthy work in flight.
+    jobStatusBadge: function(job) {
+        if (job && job.stale) {
+            return '<span class="badge badge--stale" title="stale — worker presumed dead">stale</span>';
+        }
+        return GQM.utils.statusBadge(job ? job.status : '');
+    },
+
     // Escape HTML special characters (safe for both element content and attributes).
     escapeHTML: function(str) {
         if (str == null) return '';

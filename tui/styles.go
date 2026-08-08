@@ -118,6 +118,16 @@ func styleStatus(status string) string {
 	}
 }
 
+// jobStatusCell renders a job's status, replacing "processing" with a stale
+// marker when the API reports the claim as abandoned. A job whose worker
+// process died must not read as work in flight.
+func jobStatusCell(j Job) string {
+	if j.stale() {
+		return statusStale.Render("stale")
+	}
+	return styleStatus(j.str("status"))
+}
+
 // statusBorderColor returns the border color for a DAG node with this status.
 func statusBorderColor(status string) lipgloss.AdaptiveColor {
 	switch status {

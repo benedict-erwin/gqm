@@ -247,7 +247,7 @@ GQM.pages.jobs = {
             return '<tr data-job-id="' + GQM.utils.escapeHTML(j.id).toLowerCase() + '">' +
                 '<td class="mono truncate"><a href="#/jobs/' + GQM.utils.escapeHTML(j.id) + '">' + GQM.utils.escapeHTML(j.id) + '</a></td>' +
                 '<td>' + GQM.utils.escapeHTML(j.type || '') + '</td>' +
-                '<td>' + GQM.utils.statusBadge(j.status) + '</td>' +
+                '<td>' + GQM.utils.jobStatusBadge(j) + '</td>' +
                 '<td class="dim">' + GQM.utils.formatTime(j.created_at) + '</td>' +
                 (err ? '<td class="err-cell" title="' + err + '">' + err + '</td>' : '<td class="dim">—</td>') +
                 '</tr>';
@@ -380,7 +380,7 @@ GQM.pages.jobs = {
                         '<td class="mono truncate"><a href="#/jobs/' + GQM.utils.escapeHTML(j.id) + '">' + GQM.utils.escapeHTML(j.id) + '</a></td>' +
                         '<td><a href="#/queues/' + GQM.utils.escapeHTML(queue) + '">' + GQM.utils.escapeHTML(queue) + '</a></td>' +
                         '<td>' + GQM.utils.escapeHTML(j.type || '') + '</td>' +
-                        '<td>' + GQM.utils.statusBadge(j.status) + '</td>' +
+                        '<td>' + GQM.utils.jobStatusBadge(j) + '</td>' +
                         '<td class="dim">' + GQM.utils.formatTime(j.created_at) + '</td>' +
                         (err ? '<td class="err-cell" title="' + err + '">' + err + '</td>' : '<td class="dim">—</td>') +
                         '</tr>';
@@ -452,7 +452,9 @@ GQM.pages.jobs = {
                 cls: 'tl-dot--' + j.status
             });
         } else if (j.status === 'processing') {
-            nodes.push({ label: 'Processing', time: 'running', cls: 'tl-dot--processing' });
+            nodes.push(j.stale
+                ? { label: 'Stale', time: 'worker presumed dead', cls: 'tl-dot--failed' }
+                : { label: 'Processing', time: 'running', cls: 'tl-dot--processing' });
         }
 
         var html = '<div class="timeline">';
@@ -490,7 +492,7 @@ GQM.pages.jobs = {
                 head.innerHTML = GQM.utils.pageHead({
                     crumbs: '<a href="#/queues">Queues</a> / ' +
                         (j.queue ? '<a href="#/queues/' + esc(j.queue) + '">' + esc(j.queue) + '</a> / ' : ''),
-                    title: esc(j.id) + ' ' + GQM.utils.statusBadge(j.status),
+                    title: esc(j.id) + ' ' + GQM.utils.jobStatusBadge(j),
                     titleClass: 'mono-title',
                     right: actions
                 });
@@ -520,6 +522,7 @@ GQM.pages.jobs = {
                 (j.timeout ? '<dt>Timeout</dt><dd class="mono">' + GQM.utils.formatDuration(Number(j.timeout)) + '</dd>' : '') +
                 (j.execution_duration ? '<dt>Duration</dt><dd class="mono">' + GQM.utils.formatDuration(Number(j.execution_duration)) + '</dd>' : '') +
                 (j.worker_id ? '<dt>Worker</dt><dd class="mono">' + esc(j.worker_id) + '</dd>' : '') +
+                (j.stale ? '<dt>Stale</dt><dd style="color:var(--danger)">worker presumed dead — processing deadline passed</dd>' : '') +
                 (j.enqueued_by ? '<dt>Enqueued by</dt><dd>' + esc(j.enqueued_by) + '</dd>' : '') +
                 (j.error ? '<dt>Error</dt><dd style="color:var(--danger)">' + esc(j.error) + '</dd>' : '') +
                 '</dl>' +
