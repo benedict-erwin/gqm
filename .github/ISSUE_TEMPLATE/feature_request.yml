@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose new behaviour or an API addition
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GQM keeps a small surface on purpose: three production dependencies, no
+        wrapper libraries, and an API meant to stay small enough to hold in your
+        head. That is not a rejection in advance — it is the trade-off any
+        proposal is weighed against, so make the case for the problem first.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does GQM currently get in the way?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: >-
+        What should happen instead. If it touches the public API, sketch the
+        signature or the YAML config it would use.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do today
+      description: The workaround you currently use, and why it is not enough.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other designs you thought about, including doing this outside GQM entirely.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Scope
+      options:
+        - label: I searched existing issues and this has not been proposed
+          required: true
+        - label: This can be built without adding a production dependency, or I have explained why a new one is warranted
+          required: false

@@ -1,0 +1,99 @@
+name: Bug report
+description: Something behaves differently than documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Queue bugs are usually reproducible only with the surrounding detail —
+        version, config, and which subsystem the job went through. The fields
+        below exist because those are the ones that turn out to matter.
+
+        **Security problems do not belong here.** Report them privately:
+        https://github.com/benedict-erwin/gqm/security/advisories/new
+
+  - type: input
+    id: version
+    attributes:
+      label: GQM version
+      description: "`go list -m github.com/benedict-erwin/gqm`, or the tag / commit you are on"
+      placeholder: v0.6.0
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Go and Redis versions
+      description: "`go version` and `redis-server --version` (or the managed Redis you use)"
+      placeholder: "go1.26.0 darwin/arm64 — Redis 7.2.4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      options:
+        - Core library (client, server, worker, retry, DLQ)
+        - Scheduler (delayed jobs, cron)
+        - DAG / job dependencies
+        - Monitor HTTP API
+        - Web dashboard
+        - CLI (cmd/gqm)
+        - TUI
+        - Configuration / YAML
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Include the job state you observed (pending, active, retrying, dead) if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        Steps, or a minimal Go program. A reproduction that someone else can run
+        is worth more than any amount of description.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: Your YAML config or the options you pass in code. Redact passwords and addresses.
+      render: yaml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant `slog` output, panic traces, or dashboard errors. Redact payloads that contain real data.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate
+          required: true
+        - label: I am on the latest release, or I have checked that the problem still exists there
+          required: true
+        - label: This is not a security vulnerability (those go to the private advisory link above)
+          required: true
