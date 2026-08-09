@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Phantom dead-letter entries** — a dead-lettered job whose hash expired via failure retention could leave its member in the queue's `dead_letter` sorted set forever, making counts report a job the listing could not show. The reaper now sweeps every registered queue's dead-letter set each tick and removes members whose job hash no longer exists (exact under per-job retention overrides, including permanent retention). Monitor sorted-set listings additionally repair such orphans on read and report an honest `meta.total`. The dedicated DLQ endpoint shares the queue listing path; its two error strings changed to the shared ones
+
 ## [0.5.0] — 2026-08-08
 
 A reliability release closing one long-standing hole: a worker process that
