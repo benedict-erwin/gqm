@@ -1,9 +1,9 @@
 module github.com/benedict-erwin/gqm
 
-go 1.26
+go 1.25.0
 
 require (
-	github.com/benedict-erwin/gqm/tui v0.1.0
+	github.com/benedict-erwin/gqm/tui v0.3.1
 	github.com/redis/go-redis/v9 v9.21.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/term v0.45.0
