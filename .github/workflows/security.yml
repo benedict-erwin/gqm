@@ -169,6 +169,44 @@ jobs:
           # this step.
           "$(go env GOPATH)/bin/govulncheck" ./...
 
+  # Its own job rather than a step in the matrix above, for three reasons. It
+  # needs neither Redis nor a compiler, so pairing it with a nine-minute race
+  # suite delays an answer that takes a second. It would run twice, once per
+  # matrix leg, and report the same thing twice. And a separate job is a
+  # separate status check, which is the part that matters: branch protection
+  # can require "tui pin is current" on its own, whereas inside the matrix the
+  # only requirable contexts are the two legs, which are already required for
+  # unrelated reasons and cannot express this one.
+  tui-pin:
+    name: tui pin is current
+    runs-on: ubuntu-latest
+
+    steps:
+      # fetch-depth: 0 is load-bearing, not tidiness. actions/checkout clones
+      # shallow and without tags by default, and the check compares the
+      # require line against the tag list — with no tags fetched it would find
+      # nothing to compare and pass forever, which is the exact shape of
+      # vacuous green this workflow keeps having to design against. The script
+      # refuses to treat an empty tag set as "nothing to compare" and fails,
+      # so a regression here is loud rather than silent.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Only for `go mod edit -json`; nothing is compiled, so the module cache
+      # would be written and never read.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "stable"
+          cache: false
+
+      # The logic lives in a script rather than inline here so that the same
+      # code can be run before cutting a release, next to scripts/release-check.sh,
+      # and so that proving it goes red is done against the code CI actually
+      # runs instead of a copy of it that can drift.
+      - name: root go.mod requires the newest tui tag
+        run: bash scripts/check-tui-pin.sh
+
   stress:
     name: stress suite
     # Roughly three minutes of sustained load, so it runs on a schedule and on
