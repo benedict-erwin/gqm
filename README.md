@@ -55,7 +55,7 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 ## Requirements
 
 - Go 1.25+ (the `go` directive in `go.mod`)
-- Redis 6.2+ — CI runs the suite against Redis 7
+- Redis 6.2+ — `EmptyQueue` uses `LPOP` with a count argument, added in 6.2; CI runs the suite against both 6.2 and 7
 
 ### Securing Redis
 

@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   gate:
-    name: "vet, race, vulnerabilities (go ${{ matrix.go }})"
+    name: "vet, race, vulnerabilities (go ${{ matrix.go }}, redis ${{ matrix.redis }})"
     runs-on: ubuntu-latest
 
     # Two toolchains, because one number cannot answer both questions this gate
@@ -49,14 +49,30 @@ jobs:
     # vulnerabilities. A selector picks up those security patches while the
     # floor minor stays the thing under test, so go-version-file is not coming
     # back here.
+    #
+    # The Redis version is pinned alongside the toolchain, and for the same
+    # reason: "Redis 6.2+" in the README is a published promise, and a promise
+    # nobody tests is a promise nobody notices breaking. 6.2 is where
+    # `LPOP key count` was added, and `EmptyQueue` calls exactly that — it is
+    # the single feature that sets the floor and the only thing in the suite
+    # that fails on an older server, which is why the legs pair the oldest Go
+    # with the oldest Redis and the current Go with the current Redis: one
+    # push, both ends of both promises. This matters more than it looks. The
+    # requirement used to be justified by BLMOVE, and that justification
+    # outlived the code by years — the dequeue path moved to RPOP plus a Lua
+    # script and nothing noticed, because no job ever started a server old
+    # enough to say otherwise. Moving the floor means editing this list in the
+    # same commit as the README.
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.25.x", "stable"]
+        include:
+          - { go: "1.25.x", redis: "6.2-alpine" }
+          - { go: "stable", redis: "7-alpine" }
 
     services:
       redis:
-        image: redis:7-alpine
+        image: redis:${{ matrix.redis }}
         ports:
           - 6379:6379
         options: >-
