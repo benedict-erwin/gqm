@@ -1,0 +1,14 @@
+# Blank issues stay enabled: Discussions is off for this repository, so questions
+# and anything that fits neither form still need somewhere to land.
+blank_issues_enabled: true
+
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/benedict-erwin/gqm/security/advisories/new
+    about: Never in a public issue. This channel stays private until a fix ships.
+  - name: Documentation
+    url: https://github.com/benedict-erwin/gqm#readme
+    about: Configuration reference, enqueue options, DAG, cron, and monitoring — check here before filing.
+  - name: API reference
+    url: https://pkg.go.dev/github.com/benedict-erwin/gqm
+    about: Generated godoc for the public API.

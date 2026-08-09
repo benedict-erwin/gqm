@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Contributor documentation** — `CONTRIBUTING.md` (setup, the checks CI runs, code conventions, dependency policy), `SECURITY.md` (private vulnerability reporting, supported versions, scope), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), GitHub issue forms, and a pull request template
+
+### Fixed
+- **Documented Go version** — the README advertised Go 1.22+ while `go.mod` requires 1.26, so the stated minimum was one a build would reject. Badge, requirements, and Built With now match the module. The Redis requirement no longer cites `BLMOVE`, which the dequeue path stopped using when it moved to `RPOP` plus a Lua script
+
 ## [0.6.0] — 2026-08-09
 
 A consistency release: dead-letter counts and dead-letter listings now
