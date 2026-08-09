@@ -759,6 +759,115 @@ func TestDLQ_ListEmpty(t *testing.T) {
 	}
 }
 
+// TestQueueJobs_DeadLetterRepairsOrphanEntry pins the contradiction this repair
+// exists for: a dead-letter member whose job hash has expired used to be
+// counted by ZCARD but silently dropped from the listing, so the count claimed
+// a job the operator could not see, retry, or delete.
+func TestQueueJobs_DeadLetterRepairsOrphanEntry(t *testing.T) {
+	m, rdb := testMonitor(t, Config{})
+	m.startedAt = time.Now()
+	ctx := context.Background()
+
+	dlqKey := m.key("queue", "email", "dead_letter")
+	rdb.SAdd(ctx, m.key("queues"), "email")
+	rdb.HSet(ctx, m.key("job", "live-job"),
+		"id", "live-job",
+		"type", "email.send",
+		"queue", "email",
+		"status", "dead_letter",
+	)
+	rdb.ZAdd(ctx, dlqKey, redis.Z{Score: 1, Member: "live-job"})
+	rdb.ZAdd(ctx, dlqKey, redis.Z{Score: 2, Member: "phantom-job"})
+
+	w := doRequest(m, "GET", "/api/v1/queues/email/jobs?status=dead_letter", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	data, ok := resp.Data.([]any)
+	if !ok {
+		t.Fatalf("data type = %T", resp.Data)
+	}
+	if len(data) != 1 {
+		t.Fatalf("jobs listed = %d, want 1", len(data))
+	}
+	job, ok := data[0].(map[string]any)
+	if !ok {
+		t.Fatalf("job type = %T", data[0])
+	}
+	if job["id"] != "live-job" {
+		t.Errorf("id = %v, want live-job", job["id"])
+	}
+	if resp.Meta == nil {
+		t.Fatal("meta missing")
+	}
+	if resp.Meta.Total != 1 {
+		t.Errorf("meta.total = %d, want 1", resp.Meta.Total)
+	}
+
+	members := rdb.ZRange(ctx, dlqKey, 0, -1).Val()
+	if len(members) != 1 || members[0] != "live-job" {
+		t.Errorf("dead letter members = %v, want [live-job]", members)
+	}
+}
+
+func TestQueueJobs_SortedSetListingWithoutLiveJobs(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   string
+		phantoms []string
+	}{
+		{name: "every dead letter member orphaned", status: "dead_letter", phantoms: []string{"p1", "p2"}},
+		{name: "empty dead letter set", status: "dead_letter"},
+		{name: "every processing member orphaned", status: "processing", phantoms: []string{"p1"}},
+		{name: "every completed member orphaned", status: "completed", phantoms: []string{"p1"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, rdb := testMonitor(t, Config{})
+			m.startedAt = time.Now()
+			ctx := context.Background()
+
+			key := m.key("queue", "email", tt.status)
+			rdb.SAdd(ctx, m.key("queues"), "email")
+			for i, id := range tt.phantoms {
+				rdb.ZAdd(ctx, key, redis.Z{Score: float64(i), Member: id})
+			}
+
+			w := doRequest(m, "GET", "/api/v1/queues/email/jobs?status="+tt.status, "")
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d", w.Code)
+			}
+
+			var resp response
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			data, ok := resp.Data.([]any)
+			if !ok {
+				t.Fatalf("data type = %T", resp.Data)
+			}
+			if len(data) != 0 {
+				t.Errorf("jobs listed = %d, want 0", len(data))
+			}
+			if resp.Meta == nil {
+				t.Fatal("meta missing")
+			}
+			if resp.Meta.Total != 0 {
+				t.Errorf("meta.total = %d, want 0", resp.Meta.Total)
+			}
+			if n := rdb.ZCard(ctx, key).Val(); n != 0 {
+				t.Errorf("sorted set card = %d, want 0", n)
+			}
+		})
+	}
+}
+
 // --- Mock ServerAdmin ---
 
 type mockAdmin struct {
@@ -3725,9 +3834,14 @@ func TestQueueJobs_Processing(t *testing.T) {
 	m.startedAt = time.Now()
 	ctx := context.Background()
 
-	// Add jobs to processing sorted set
-	rdb.ZAdd(ctx, m.key("queue", "email", "processing"), redis.Z{Score: 1, Member: "j1"})
-	rdb.ZAdd(ctx, m.key("queue", "email", "processing"), redis.Z{Score: 2, Member: "j2"})
+	// Add jobs to processing sorted set. The job hashes have to exist: a member
+	// without one is an orphan, and the listing removes those instead of
+	// counting them.
+	for i, id := range []string{"j1", "j2"} {
+		rdb.HSet(ctx, m.key("job", id),
+			"id", id, "type", "email.send", "queue", "email", "status", "processing")
+		rdb.ZAdd(ctx, m.key("queue", "email", "processing"), redis.Z{Score: float64(i + 1), Member: id})
+	}
 
 	w := doRequest(m, "GET", "/api/v1/queues/email/jobs?status=processing", "")
 	if w.Code != http.StatusOK {
@@ -4868,12 +4982,17 @@ func TestListQueues_PausedWithCounters(t *testing.T) {
 
 // handleListDLQ: with job data
 
+// TestListDLQ_WithJobData covers the dedicated DLQ endpoint on the same fixture
+// the queue jobs endpoint is tested with: two live entries and one member whose
+// job hash is gone. The orphan is repaired away rather than counted, so the
+// endpoint no longer reports a job it cannot show.
 func TestListDLQ_WithJobData(t *testing.T) {
 	m, rdb := testMonitor(t, Config{})
 	m.startedAt = time.Now()
 	ctx := context.Background()
 
-	rdb.ZAdd(ctx, m.key("queue", "email", "dead_letter"),
+	dlqKey := m.key("queue", "email", "dead_letter")
+	rdb.ZAdd(ctx, dlqKey,
 		redis.Z{Score: 1, Member: "j1"},
 		redis.Z{Score: 2, Member: "j2"},
 		redis.Z{Score: 3, Member: "stale"}, // no hash data
@@ -4888,12 +5007,20 @@ func TestListDLQ_WithJobData(t *testing.T) {
 
 	var resp response
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.Meta.Total != 3 {
-		t.Errorf("total = %d, want 3", resp.Meta.Total)
+	if resp.Meta == nil {
+		t.Fatal("meta missing")
+	}
+	if resp.Meta.Total != 2 {
+		t.Errorf("total = %d, want 2", resp.Meta.Total)
 	}
 	data := resp.Data.([]any)
 	if len(data) != 2 {
-		t.Errorf("jobs = %d, want 2 (stale filtered)", len(data))
+		t.Errorf("jobs = %d, want 2", len(data))
+	}
+
+	members := rdb.ZRange(ctx, dlqKey, 0, -1).Val()
+	if len(members) != 2 || members[0] != "j1" || members[1] != "j2" {
+		t.Errorf("dead letter members = %v, want [j1 j2]", members)
 	}
 }
 

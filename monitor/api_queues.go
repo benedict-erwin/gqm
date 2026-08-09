@@ -180,6 +180,13 @@ func (m *Monitor) handleListQueueJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // listSortedSetJobs handles paginated listing from a sorted set (processing, completed, dead_letter).
+//
+// A member whose job hash is gone is repaired on read. Every transition that
+// writes one of these sets writes the job hash in the same Lua call, so member
+// present with hash absent is never a job mid-transition: it is an index entry
+// that outlived its job, most often a dead-letter member left behind when the
+// hash reached its failure retention TTL. Left alone it makes the count report
+// jobs the listing cannot show.
 func (m *Monitor) listSortedSetJobs(w http.ResponseWriter, r *http.Request, key string, page, limit int) {
 	ctx := r.Context()
 
@@ -198,7 +205,26 @@ func (m *Monitor) listSortedSetJobs(w http.ResponseWriter, r *http.Request, key 
 		return
 	}
 
-	jobs := m.fetchJobSummaries(ctx, jobIDs)
+	jobs, missing := m.fetchJobSummariesWithMissing(ctx, jobIDs)
+	if len(missing) > 0 {
+		members := make([]any, len(missing))
+		for i, id := range missing {
+			members[i] = id
+		}
+		removed, err := m.rdb.ZRem(ctx, key, members...).Result()
+		if err != nil {
+			m.logger.Warn("failed to remove orphaned entries", "key", key, "error", err)
+		} else if removed > 0 {
+			m.logger.Warn("removed orphaned entries: job hashes no longer exist",
+				"key", key, "count", removed)
+			// Correcting the count by what this page dropped keeps it honest for
+			// this response without a second ZCARD, which would report a
+			// different moment than the one the page was read at. Orphans on
+			// other pages correct themselves as those pages are read.
+			total -= removed
+		}
+	}
+
 	writeJSON(w, http.StatusOK, response{
 		Data: jobs,
 		Meta: &meta{Page: page, Limit: limit, Total: int(total)},

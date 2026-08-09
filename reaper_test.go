@@ -76,6 +76,144 @@ func seedProcessing(t *testing.T, rc *RedisClient, queue, jobID string, deadline
 	}
 }
 
+// seedDeadLetter registers queue in the queue registry and puts jobID in its
+// dead-letter set. A job hash is written only for a live entry; without one the
+// entry is a phantom, exactly what failure retention leaves behind when the
+// hash expires and no later job dead-letters in the same queue.
+func seedDeadLetter(t *testing.T, rc *RedisClient, queue, jobID string, live bool) {
+	t.Helper()
+	ctx := context.Background()
+
+	if err := rc.rdb.SAdd(ctx, rc.Key("queues"), queue).Err(); err != nil {
+		t.Fatalf("registering queue: %v", err)
+	}
+	if live {
+		if err := rc.rdb.HSet(ctx, rc.Key("job", jobID), map[string]any{
+			"id":      jobID,
+			"type":    "test.job",
+			"queue":   queue,
+			"payload": "{}",
+			"status":  StatusDeadLetter,
+		}).Err(); err != nil {
+			t.Fatalf("seeding job hash: %v", err)
+		}
+	}
+	if err := rc.rdb.ZAdd(ctx, rc.Key("queue", queue, "dead_letter"),
+		redis.Z{Score: float64(time.Now().Unix()), Member: jobID}).Err(); err != nil {
+		t.Fatalf("seeding dead letter set: %v", err)
+	}
+}
+
+func TestTrimDeadLetter_RemovesEntriesWithoutJobHash(t *testing.T) {
+	tests := []struct {
+		name     string
+		live     []string
+		phantoms []string
+	}{
+		{
+			name:     "phantom beside a live entry",
+			live:     []string{"live"},
+			phantoms: []string{"phantom"},
+		},
+		{
+			name:     "every entry is a phantom",
+			phantoms: []string{"phantom-1", "phantom-2"},
+		},
+		{
+			name: "nothing to trim",
+			live: []string{"live-1", "live-2"},
+		},
+		{
+			name: "empty dead letter set",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			se, rc := testReaper(t, newDefaultPoolConfig("p", "q"))
+			ctx := context.Background()
+
+			// Registered even when nothing is seeded: the trim still has to
+			// visit a queue whose dead-letter set does not exist.
+			if err := rc.rdb.SAdd(ctx, rc.Key("queues"), "q").Err(); err != nil {
+				t.Fatalf("registering queue: %v", err)
+			}
+			for _, id := range tt.live {
+				seedDeadLetter(t, rc, "q", id, true)
+			}
+			for _, id := range tt.phantoms {
+				seedDeadLetter(t, rc, "q", id, false)
+			}
+
+			se.trimDeadLetter(ctx)
+
+			got, err := rc.rdb.ZRange(ctx, rc.Key("queue", "q", "dead_letter"), 0, -1).Result()
+			if err != nil {
+				t.Fatalf("reading dead letter set: %v", err)
+			}
+			if len(got) != len(tt.live) {
+				t.Fatalf("dead letter members = %v, want %v", got, tt.live)
+			}
+			remaining := make(map[string]bool, len(got))
+			for _, id := range got {
+				remaining[id] = true
+			}
+			for _, id := range tt.live {
+				if !remaining[id] {
+					t.Errorf("live entry %q was removed", id)
+				}
+			}
+		})
+	}
+}
+
+func TestTrimDeadLetter_ScansQueueKnownOnlyToTheRegistry(t *testing.T) {
+	se, rc := testReaper(t, newDefaultPoolConfig("p", "q"))
+	ctx := context.Background()
+
+	// No pool lists "retired", so the pool walk reapStale does would never
+	// reach it — yet its phantom is just as visible in the dashboard count.
+	seedDeadLetter(t, rc, "retired", "phantom", false)
+	seedDeadLetter(t, rc, "retired", "live", true)
+
+	se.trimDeadLetter(ctx)
+
+	got := rc.rdb.ZRange(ctx, rc.Key("queue", "retired", "dead_letter"), 0, -1).Val()
+	if len(got) != 1 || got[0] != "live" {
+		t.Errorf("dead letter members = %v, want [live]", got)
+	}
+}
+
+// TestTrimDeadLetter_SweepsPastOneBatch covers the paging arithmetic. Removing
+// members shifts every later member left, so advancing the page offset by the
+// full batch size would step over entries and leave phantoms behind.
+func TestTrimDeadLetter_SweepsPastOneBatch(t *testing.T) {
+	se, rc := testReaper(t, newDefaultPoolConfig("p", "q"))
+	ctx := context.Background()
+
+	var wantLive []string
+	for i := 0; i < reaperBatchSize+reaperBatchSize/2; i++ {
+		id := fmt.Sprintf("job-%03d", i)
+		live := i%2 == 0
+		seedDeadLetter(t, rc, "q", id, live)
+		if live {
+			wantLive = append(wantLive, id)
+		}
+	}
+
+	se.trimDeadLetter(ctx)
+
+	got := rc.rdb.ZRange(ctx, rc.Key("queue", "q", "dead_letter"), 0, -1).Val()
+	if len(got) != len(wantLive) {
+		t.Fatalf("dead letter card = %d, want %d", len(got), len(wantLive))
+	}
+	for i, id := range wantLive {
+		if got[i] != id {
+			t.Fatalf("member %d = %q, want %q", i, got[i], id)
+		}
+	}
+}
+
 func TestReapStale_RetriesWhenRetriesRemain(t *testing.T) {
 	tests := []struct {
 		name           string
