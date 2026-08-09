@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Documented Redis minimum was right by accident** — the README asked for Redis 6.2+ but rested that number on `BLMOVE`, a command the dequeue path abandoned when it moved to `RPOP` plus a Lua script, so the stated reason outlived the code by years while the number happened to stay correct. Running the full suite against pinned servers found the actual constraint: `LPOP` with a count argument, added in 6.2 and used by `EmptyQueue`, is the only thing in the tree that an older server rejects — Redis 5.0 and 6.0 fail exactly three tests with `ERR wrong number of arguments for 'lpop' command`, and everything else passes. The requirement itself is unchanged and no code moved; the reason is now the true one, and CI keeps it honest by running the gate suite against Redis 6.2 on the minimum Go toolchain alongside Redis 7 on stable, so the floor is a version that gets tested rather than a version that gets claimed
+
 ## [0.7.0] — 2026-08-09
 
 A distribution release: nothing in the queue engine changed, and the public
