@@ -89,41 +89,34 @@ func (m *Monitor) annotateStale(ctx context.Context, jobs []map[string]any) {
 
 // handleListDLQ returns paginated dead letter queue jobs.
 func (m *Monitor) handleListDLQ(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	name := r.PathValue("name")
 	if !validatePathParam(w, "name", name) {
 		return
 	}
 	page, limit := pagination(r)
 
-	dlqKey := m.key("queue", name, "dead_letter")
-
-	total, err := m.rdb.ZCard(ctx, dlqKey).Result()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to count DLQ", "INTERNAL")
-		return
-	}
-
-	start := int64((page - 1) * limit)
-	stop := start + int64(limit) - 1
-
-	jobIDs, err := m.rdb.ZRange(ctx, dlqKey, start, stop).Result()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list DLQ jobs", "INTERNAL")
-		return
-	}
-
-	jobs := m.fetchJobSummaries(ctx, jobIDs)
-	writeJSON(w, http.StatusOK, response{
-		Data: jobs,
-		Meta: &meta{Page: page, Limit: limit, Total: int(total)},
-	})
+	// Same listing as ?status=dead_letter on the queue jobs endpoint, down to
+	// the pagination and the orphan repair — sharing it keeps the two from
+	// drifting into reporting different counts for the same sorted set.
+	m.listSortedSetJobs(w, r, m.key("queue", name, "dead_letter"), page, limit)
 }
 
 // fetchJobSummaries fetches job data for a list of job IDs using pipelining.
 func (m *Monitor) fetchJobSummaries(ctx context.Context, jobIDs []string) []map[string]any {
+	jobs, _ := m.fetchJobSummariesWithMissing(ctx, jobIDs)
+	return jobs
+}
+
+// fetchJobSummariesWithMissing is fetchJobSummaries plus the ids that no longer
+// have a job hash, so a caller listing from an index can tell an index entry
+// that outlived its job from one that is simply not there yet.
+//
+// Only an empty hash counts as missing: a Redis error says nothing about
+// whether the job exists, and treating it as absence would delete live entries
+// during an outage.
+func (m *Monitor) fetchJobSummariesWithMissing(ctx context.Context, jobIDs []string) ([]map[string]any, []string) {
 	if len(jobIDs) == 0 {
-		return []map[string]any{}
+		return []map[string]any{}, nil
 	}
 
 	pipe := m.rdb.Pipeline()
@@ -134,15 +127,20 @@ func (m *Monitor) fetchJobSummaries(ctx context.Context, jobIDs []string) []map[
 	pipe.Exec(ctx)
 
 	jobs := make([]map[string]any, 0, len(jobIDs))
-	for _, cmd := range cmds {
+	var missing []string
+	for i, cmd := range cmds {
 		data, err := cmd.Result()
-		if err != nil || len(data) == 0 {
+		if err != nil {
+			continue
+		}
+		if len(data) == 0 {
+			missing = append(missing, jobIDs[i])
 			continue
 		}
 		jobs = append(jobs, mapToJobResponse(data))
 	}
 	m.annotateStale(ctx, jobs)
-	return jobs
+	return jobs, missing
 }
 
 // jobAllowedFields is the set of job hash fields that are safe to expose in

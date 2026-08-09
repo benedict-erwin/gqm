@@ -37,6 +37,7 @@ func newSchedulerEngine(server *Server) *schedulerEngine {
 // 2. Polls the scheduled sorted set (retry + delayed jobs)
 // 3. Evaluates cron entries and enqueues due jobs
 // 4. Reclaims jobs abandoned in the processing set by a dead worker process
+// 5. Drops dead-letter entries whose job hash has expired out from under them
 func (se *schedulerEngine) run(ctx context.Context) {
 	ticker := time.NewTicker(se.server.cfg.schedulerPollInterval)
 	defer ticker.Stop()
@@ -66,6 +67,7 @@ func (se *schedulerEngine) tick(ctx context.Context) {
 	se.pollScheduled(ctx, now)
 	se.evalCron(ctx, now)
 	se.reapStale(ctx, now)
+	se.trimDeadLetter(ctx)
 }
 
 // redisTime returns the current time from Redis, used as a single source of

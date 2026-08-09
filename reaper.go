@@ -67,6 +67,104 @@ func (se *schedulerEngine) reapStale(ctx context.Context, now time.Time) {
 	}
 }
 
+// trimDeadLetter drops dead-letter entries whose job hash no longer exists.
+//
+// deadletter.lua puts the job's id in the queue's dead-letter set and stamps
+// the hash with the failure retention TTL, but a sorted set member cannot
+// expire on its own. Its only other trim runs inside deadletter.lua itself, so
+// a queue that never dead-letters again keeps the member forever: the count
+// reports a dead job the listing cannot show, because the listing joins to a
+// hash Redis has already removed.
+//
+// The test is existence-based rather than score-based on purpose. Failure
+// retention is resolved per job (Job.FailureTTL overrides the server default,
+// and a negative value keeps the hash forever), so no single retention window
+// is right: it would drop members whose hash is still alive and keep members
+// whose hash expired long ago. EXISTS is exact under every setting, and it also
+// heals orphans left behind by anything else that removed a hash.
+func (se *schedulerEngine) trimDeadLetter(ctx context.Context) {
+	rc := se.server.rc
+
+	// The queue registry rather than the pools: a queue no pool listens on any
+	// more still holds whatever dead-lettered before, and nothing else would
+	// ever visit it.
+	queues, err := rc.rdb.SMembers(ctx, rc.Key("queues")).Result()
+	if err != nil {
+		if ctx.Err() == nil {
+			se.logger.Error("listing queues for dead letter trim", "error", err)
+		}
+		return
+	}
+
+	for _, queue := range queues {
+		se.trimQueueDeadLetter(ctx, queue)
+	}
+}
+
+// trimQueueDeadLetter sweeps one queue's dead-letter set and removes every
+// member whose job hash is gone.
+func (se *schedulerEngine) trimQueueDeadLetter(ctx context.Context, queue string) {
+	rc := se.server.rc
+	dlqKey := rc.Key("queue", queue, "dead_letter")
+
+	// One tick walks the whole set instead of stopping after a batch: the
+	// dead-letter set is an exception path and expected to stay small, and a
+	// phantom carried over to the next tick is the very thing this prevents.
+	for start := int64(0); ; {
+		jobIDs, err := rc.rdb.ZRange(ctx, dlqKey, start, start+reaperBatchSize-1).Result()
+		if err != nil {
+			if ctx.Err() == nil {
+				se.logger.Error("scanning dead letter set", "queue", queue, "error", err)
+			}
+			return
+		}
+		if len(jobIDs) == 0 {
+			return
+		}
+
+		pipe := rc.rdb.Pipeline()
+		exists := make([]*redis.IntCmd, len(jobIDs))
+		for i, jobID := range jobIDs {
+			exists[i] = pipe.Exists(ctx, rc.Key("job", jobID))
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			if ctx.Err() == nil {
+				se.logger.Error("checking dead letter job hashes", "queue", queue, "error", err)
+			}
+			return
+		}
+
+		orphans := make([]any, 0, len(jobIDs))
+		for i, cmd := range exists {
+			if cmd.Val() == 0 {
+				orphans = append(orphans, jobIDs[i])
+			}
+		}
+
+		if len(orphans) > 0 {
+			// A hash cannot reappear between the check and the removal: ids are
+			// never reused, and both the admin retry path and dequeue.lua refuse
+			// a job that has no hash. Losing the race only means removing on this
+			// tick what the next one would have removed anyway.
+			if err := rc.rdb.ZRem(ctx, dlqKey, orphans...).Err(); err != nil {
+				if ctx.Err() == nil {
+					se.logger.Error("removing orphaned dead letter entries", "queue", queue, "error", err)
+				}
+				return
+			}
+			se.logger.Warn("removed orphaned dead letter entries: job hashes no longer exist",
+				"queue", queue, "count", len(orphans))
+		}
+
+		if len(jobIDs) < reaperBatchSize {
+			return
+		}
+		// Removing members shifts every later member left by that many places,
+		// so the next page starts where this one's survivors end.
+		start += int64(len(jobIDs) - len(orphans))
+	}
+}
+
 // poolGracePeriod returns the pool's effective grace period: the window a
 // worker gives a canceled handler before it stops waiting and writes the job's
 // outcome itself.
