@@ -10,8 +10,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 - **Contributor documentation** — `CONTRIBUTING.md` (setup, the checks CI runs, code conventions, dependency policy), `SECURITY.md` (private vulnerability reporting, supported versions, scope), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), GitHub issue forms, and a pull request template
 
+### Changed
+- **Minimum Go version lowered to 1.25** — the `go` directive said 1.26 only because that was the toolchain in use, not because anything needed it, which shut out every Go 1.25 user for no reason. 1.25.0 is the real floor: `golang.org/x/crypto` (with `x/term`, `x/sys`, and `x/text`) declares it, and no toolchain below that can build the vendored tree. No dependency version changed
+
 ### Fixed
-- **Documented Go version** — the README advertised Go 1.22+ while `go.mod` requires 1.26, so the stated minimum was one a build would reject. Badge, requirements, and Built With now match the module. The Redis requirement no longer cites `BLMOVE`, which the dequeue path stopped using when it moved to `RPOP` plus a Lua script
+- **Documented Go version** — the README advertised Go 1.22+, a minimum no build of this module would accept: `golang.org/x/crypto` alone rules out anything below 1.25. Badge, requirements, and Built With now match the module. The Redis requirement no longer cites `BLMOVE`, which the dequeue path stopped using when it moved to `RPOP` plus a Lua script
 
 ## [0.6.0] — 2026-08-09
 
