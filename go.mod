@@ -1,6 +1,6 @@
 module github.com/benedict-erwin/gqm
 
-go 1.25.0
+go 1.26
 
 require (
 	github.com/benedict-erwin/gqm/tui v0.1.0
