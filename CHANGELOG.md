@@ -5,7 +5,24 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] — 2026-08-09
+
+A distribution release: nothing in the queue engine changed, and the public
+Go API is untouched, but what you actually receive when you install this
+project is different.
+
+Two problems turned out to be the same problem. The `go` directive claimed
+1.26 when the dependencies only require 1.25.0, locking out Go 1.25 users
+for no reason — and it could not be lowered, because the root module pinned
+`tui v0.1.0` from February, which itself declares 1.26. That pin was the
+larger bug: every release so far installed a terminal UI six months stale,
+missing the DAG tab, the drill-down views, the 0.4.0 restyle, and the
+stale-job markers from 0.5.0. Nothing local could reveal it, since `go.work`
+substitutes the tui directory and hides the version the proxy would serve.
+
+This is a minor bump rather than a patch because CLI users get a visibly
+different TUI and the module graph moved. The `tui` module itself is
+unchanged since `tui/v0.3.1` and gets no new tag.
 
 ### Added
 - **Contributor documentation** — `CONTRIBUTING.md` (setup, the checks CI runs, code conventions, dependency policy), `SECURITY.md` (private vulnerability reporting, supported versions, scope), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), GitHub issue forms, and a pull request template
