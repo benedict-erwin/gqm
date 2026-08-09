@@ -26,8 +26,33 @@ permissions:
 
 jobs:
   gate:
-    name: vet, race, vulnerabilities
+    name: "vet, race, vulnerabilities (go ${{ matrix.go }})"
     runs-on: ubuntu-latest
+
+    # Two toolchains, because one number cannot answer both questions this gate
+    # is asked. "1.25.x" is the floor the module declares — it must keep
+    # building, or the `go` directive in go.mod is a promise the code does not
+    # keep — and it tracks that directive, so moving the floor means editing
+    # this list in the same commit. "stable" is what most people actually have
+    # installed, and it is where a new vet check or a changed runtime first
+    # shows up. fail-fast is off: a break on one version must not cancel the
+    # other and leave its result unknown, which is precisely the case where
+    # knowing whether the break is version-specific matters most.
+    #
+    # Note the ".x": these are resolved patch selectors, not pins. This job
+    # used go-version-file: go.mod, which reads the directive and installs that
+    # EXACT patch. That looked harmless while the floor happened to be the
+    # newest release, but it is a slow trap — a floor is meant to be old, so
+    # pinning to it means CI ages into a toolchain carrying published standard
+    # library advisories, and govulncheck then fails on the runner's Go rather
+    # than on anything in this repository. It did: go1.25.0 has 23 known stdlib
+    # vulnerabilities. A selector picks up those security patches while the
+    # floor minor stays the thing under test, so go-version-file is not coming
+    # back here.
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25.x", "stable"]
 
     services:
       redis:
@@ -48,7 +73,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
           cache: true
 
       - name: go vet
@@ -155,7 +180,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: "stable"
           cache: true
 
       - name: go test -race with stress
