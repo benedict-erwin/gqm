@@ -100,6 +100,65 @@ done
 echo
 
 # ---------------------------------------------------------------------------
+bold "TUI module vs its newest tag"
+# ---------------------------------------------------------------------------
+# scripts/check-tui-pin.sh covers the other half of this: that the root go.mod
+# requires the newest tui/vX.Y.Z tag. It compares two version strings and never
+# reads the tui source tree, so it stays green while tui/ moves past the tag it
+# names. Release in that state and every `go install` of cmd/gqm gets the older
+# TUI — the v0.7.0 bug reached from the other direction, and only visible to
+# consumers, since go.work substitutes the local tui/ directory for everyone
+# working here.
+#
+# Compared against $HEAD_REF rather than the working tree's HEAD: every other
+# section reports on $BASE..$HEAD_REF, and the ref being released is the one
+# whose tui/ sources consumers do or do not receive. Uncommitted edits under
+# tui/ are invisible here, which is correct — they are not part of the release
+# either.
+#
+# Tag filtering follows check-tui-pin.sh exactly: plain vX.Y.Z only, because a
+# release candidate would make "newest" a judgement call, and sort -V rather
+# than sort, under which v0.10.0 comes before v0.9.0.
+tui_tags=$(git tag --list 'tui/v*' | grep -E '^tui/v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+if [[ -z "$tui_tags" ]]; then
+  echo "  no tui/vX.Y.Z tags in this checkout — nothing to compare tui/ against."
+  echo "  a clone fetched without tags looks exactly like a repo that never"
+  echo "  tagged tui, so treat this as unanswered rather than as no drift."
+else
+  tui_tag="tui/$(sed 's|^tui/||' <<<"$tui_tags" | sort -V | tail -n1)"
+  # Status captured rather than discarded with `|| true`: a failed diff also
+  # produces no filenames, and reporting that as "unchanged" would be this
+  # section confidently answering a question it never asked. $BASE and $HEAD_REF
+  # are rev-parse-verified at the top of the script; the tag arrives from the
+  # tag list unverified, and a tag on a non-commit object, or a partial clone
+  # missing the objects, lands here.
+  tui_files=$(git diff --name-only "$tui_tag" "$HEAD_REF" -- 'tui/' 2>/dev/null)
+  tui_status=$?
+  if [[ "$tui_status" != "0" ]]; then
+    echo "  could not diff $tui_tag against $HEAD_REF (git exited $tui_status) —"
+    echo "  tui/ is unanswered here, not unchanged. Re-run it by hand to see why;"
+    echo "  a failed comparison is not evidence of no drift."
+  elif [[ -z "$tui_files" ]]; then
+    echo "  tui/ is unchanged since $tui_tag — that tag still describes these sources."
+  else
+    echo "  tui/ has moved since $tui_tag:"
+    sed 's/^/    /' <<<"$tui_files"
+    tui_commits=$(git log --format='    %h %s' "$tui_tag..$HEAD_REF" -- 'tui/' 2>/dev/null || true)
+    if [[ -n "$tui_commits" ]]; then
+      echo "  commits touching tui/:"
+      echo "$tui_commits"
+    fi
+    echo
+    echo "  -> releasing now ships $tui_tag to everyone installing the CLI, and the"
+    echo "     work above reaches nobody. Tag tui first, then bump the root require"
+    echo "     (go mod edit -require=.../tui@vX.Y.Z && go mod tidy) and re-run this."
+    echo "     Deliberately releasing the root without re-tagging tui is a valid"
+    echo "     choice; this reports it so that it stays a choice."
+  fi
+fi
+echo
+
+# ---------------------------------------------------------------------------
 bold "Commits"
 # ---------------------------------------------------------------------------
 git log --format='  %h %s' "$RANGE"
