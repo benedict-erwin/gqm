@@ -3,7 +3,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/benedict-erwin/gqm)](https://goreportcard.com/report/github.com/benedict-erwin/gqm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/benedict-erwin/gqm)](https://github.com/benedict-erwin/gqm/releases)
-[![Go Version](https://img.shields.io/badge/Go-1.26%2B-blue)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.25%2B-blue)](https://golang.org)
 
 Redis-based task queue library for Go. Built from scratch with minimal dependencies, progressive disclosure API, and production-grade features including worker isolation, DAG dependencies, cron scheduling, and an embedded monitoring dashboard.
 
@@ -54,7 +54,7 @@ Redis-based task queue library for Go. Built from scratch with minimal dependenc
 
 ## Requirements
 
-- Go 1.26+ (the `go` directive in `go.mod`)
+- Go 1.25+ (the `go` directive in `go.mod`)
 - Redis 6.2+ — CI runs the suite against Redis 7
 
 ### Securing Redis
@@ -1199,7 +1199,7 @@ MIT
 
 ## Built With
 
-- **Go 1.26+** — core language
+- **Go 1.25+** — core language
 - **Redis 7** — backbone storage
 - **Claude (Anthropic)** — AI pair programming assistant for implementation & docs
 
